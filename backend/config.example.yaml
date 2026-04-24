@@ -7,6 +7,9 @@ server:
   web_root: "./web"
   # 基础路径（反向代理场景可改）。
   base_path: "/"
+  # CORS Origin 白名单。空 = 不放行跨域（生产推荐同源部署）。
+  # 开发态前端通过 vite proxy 访问后端，无需配置。
+  allowed_origins: []
 
 database:
   # SQLite 文件路径。目录不存在会自动创建。

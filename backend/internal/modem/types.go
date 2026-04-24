@@ -60,98 +60,98 @@ const (
 
 // Port 表示 modem 暴露的一个端口。Type 是字符串化的 MMModemPortType。
 type Port struct {
-	Name string // 例如 "cdc-wdm0"、"ttyUSB2"
-	Type string // "net" / "at" / "qmi" / "mbim" / "gps" / "ignored" / "unknown" ...
+	Name string `json:"name"` // 例如 "cdc-wdm0"、"ttyUSB2"
+	Type string `json:"type"` // "net" / "at" / "qmi" / "mbim" / "gps" / "ignored" / "unknown" ...
 }
 
 // ModemState 是一个 modem 的完整内存快照。来源于 MM 的多个接口合并：
 // Modem / Modem3gpp / Messaging / Signal 等。
 type ModemState struct {
-	DeviceID string // Modem.DeviceIdentifier (主键)
-	DBusPath string // 当前 DBus path（易变）
+	DeviceID string `json:"device_id"` // Modem.DeviceIdentifier (主键)
+	DBusPath string `json:"dbus_path"` // 当前 DBus path（易变）
 
-	Manufacturer     string
-	Model            string
-	Revision         string
-	HardwareRevision string
-	Plugin           string
-	IMEI             string
-	PrimaryPort      string
-	Ports            []Port
-	USBPath          string // Physdev，sysfs 路径
+	Manufacturer     string `json:"manufacturer"`
+	Model            string `json:"model"`
+	Revision         string `json:"revision"`
+	HardwareRevision string `json:"hardware_revision"`
+	Plugin           string `json:"plugin"`
+	IMEI             string `json:"imei"`
+	PrimaryPort      string `json:"primary_port"`
+	Ports            []Port `json:"ports"`
+	USBPath          string `json:"usb_path"` // Physdev，sysfs 路径
 
-	State        ModemStateEnum
-	FailedReason string // sim-missing / sim-error / ...
-	PowerState   string // off / low / on / unknown
+	State        ModemStateEnum `json:"state"`
+	FailedReason string         `json:"failed_reason"` // sim-missing / sim-error / ...
+	PowerState   string         `json:"power_state"`   // off / low / on / unknown
 
-	AccessTech    []string // 解码后的技术列表，例如 ["lte"]
-	SignalQuality int      // 0-100
-	SignalRecent  bool
+	AccessTech    []string `json:"access_tech"` // 解码后的技术列表，例如 ["lte"]
+	SignalQuality int      `json:"signal_quality"` // 0-100
+	SignalRecent  bool     `json:"signal_recent"`
 
-	Registration string // home / roaming / searching / denied / unknown / ...
-	OperatorID   string // MCCMNC
-	OperatorName string
-	OwnNumbers   []string
+	Registration string   `json:"registration"`   // home / roaming / searching / denied / unknown / ...
+	OperatorID   string   `json:"operator_id"`    // MCCMNC
+	OperatorName string   `json:"operator_name"`
+	OwnNumbers   []string `json:"own_numbers"`
 
-	HasSim bool
-	SIM    *SimState // 当前插入的 SIM
+	HasSim bool      `json:"has_sim"`
+	SIM    *SimState `json:"sim,omitempty"` // 当前插入的 SIM
 
 	// 能力探测：基于 GetManagedObjects 返回的接口列表。
-	HasUSSD      bool
-	HasSignal    bool
-	HasMessaging bool
+	HasUSSD      bool `json:"has_ussd"`
+	HasSignal    bool `json:"has_signal"`
+	HasMessaging bool `json:"has_messaging"`
 
-	SupportedStorages []string // 例如 ["sm","me"]
+	SupportedStorages []string `json:"supported_storages"` // 例如 ["sm","me"]
 }
 
 // SimState 对应 MM Sim 接口。
 type SimState struct {
-	DBusPath         string
-	ICCID            string
-	IMSI             string
-	EID              string
-	OperatorID       string
-	OperatorName     string
-	Active           bool
-	EmergencyNumbers []string
-	SimType          string // physical / esim / unknown
+	DBusPath         string   `json:"dbus_path"`
+	ICCID            string   `json:"iccid"`
+	IMSI             string   `json:"imsi"`
+	EID              string   `json:"eid"`
+	OperatorID       string   `json:"operator_id"`
+	OperatorName     string   `json:"operator_name"`
+	Active           bool     `json:"active"`
+	EmergencyNumbers []string `json:"emergency_numbers"`
+	SimType          string   `json:"sim_type"` // physical / esim / unknown
 }
 
 // SMSRecord 对应 MM Sms 对象的一条短信。
 type SMSRecord struct {
-	ExtID         string // DBus object path，作为外部唯一 id
-	Direction     string // inbound / outbound
-	State         string // unknown / stored / receiving / received / sending / sent
-	Peer          string
-	Text          string
-	SMSC          string
-	Timestamp     time.Time // 来自 SMS Center 的时间
-	Storage       string
-	DeliveryState uint32
+	ExtID         string    `json:"ext_id"`    // DBus object path，作为外部唯一 id
+	Direction     string    `json:"direction"` // inbound / outbound
+	State         string    `json:"state"`     // unknown / stored / receiving / received / sending / sent
+	Peer          string    `json:"peer"`
+	Text          string    `json:"text"`
+	SMSC          string    `json:"smsc"`
+	Timestamp     time.Time `json:"timestamp"` // 来自 SMS Center 的时间
+	Storage       string    `json:"storage"`
+	DeliveryState uint32    `json:"delivery_state"`
 }
 
 // USSDState 表示一次 USSD 会话的当前状态。
 type USSDState struct {
-	SessionID           string // 约定 = DeviceID，MM 侧无显式 session id
-	DeviceID            string
-	State               string // idle / active / user_response / unknown
-	LastRequest         string
-	LastResponse        string
-	NetworkRequest      string
-	NetworkNotification string
+	SessionID           string `json:"session_id"` // 约定 = DeviceID，MM 侧无显式 session id
+	DeviceID            string `json:"device_id"`
+	State               string `json:"state"` // idle / active / user_response / unknown
+	LastRequest         string `json:"last_request"`
+	LastResponse        string `json:"last_response"`
+	NetworkRequest      string `json:"network_request"`
+	NetworkNotification string `json:"network_notification"`
 }
 
 // SignalSample 是一次 signal 采样（用于阶段 7 图表）。
 type SignalSample struct {
-	DeviceID     string
-	QualityPct   int
-	RSSIdBm      *int
-	RSRPdBm      *int
-	RSRQdB       *int
-	SNRdB        *float64
-	AccessTech   string
-	Registration string
-	OperatorID   string
-	OperatorName string
-	SampledAt    time.Time
+	DeviceID     string    `json:"device_id"`
+	QualityPct   int       `json:"quality_pct"`
+	RSSIdBm      *int      `json:"rssi_dbm"`
+	RSRPdBm      *int      `json:"rsrp_dbm"`
+	RSRQdB       *int      `json:"rsrq_db"`
+	SNRdB        *float64  `json:"snr_db"`
+	AccessTech   string    `json:"access_tech"`
+	Registration string    `json:"registration"`
+	OperatorID   string    `json:"operator_id"`
+	OperatorName string    `json:"operator_name"`
+	SampledAt    time.Time `json:"sampled_at"`
 }

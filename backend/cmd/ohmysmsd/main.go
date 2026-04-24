@@ -1,7 +1,10 @@
 // Command ohmysmsd 是 ohmysmsapp 的后端守护进程。
 //
-// 阶段 1（当前）：加载配置 → 打开 SQLite → 启动 HTTP 服务（含 SPA 托管）→ 优雅退出。
-// 后续阶段会在此注入 ModemManager、Telegram、ESIM 等子系统。
+// 阶段 3：完整的 HTTP REST API + WebSocket 实时推送。
+// 子命令：
+//   ohmysmsd -config config.yaml   正常启动
+//   ohmysmsd hash-password <pw>    打印 bcrypt hash
+//   ohmysmsd -version              打印版本
 package main
 
 import (
@@ -15,11 +18,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kimmy/ohmysmsapp/backend/internal/config"
-	"github.com/kimmy/ohmysmsapp/backend/internal/db"
-	"github.com/kimmy/ohmysmsapp/backend/internal/httpapi"
-	"github.com/kimmy/ohmysmsapp/backend/internal/logging"
-	"github.com/kimmy/ohmysmsapp/backend/internal/modem"
+	"github.com/KimmyXYC/ohmysmsapp/backend/internal/auth"
+	"github.com/KimmyXYC/ohmysmsapp/backend/internal/config"
+	"github.com/KimmyXYC/ohmysmsapp/backend/internal/db"
+	"github.com/KimmyXYC/ohmysmsapp/backend/internal/httpapi"
+	"github.com/KimmyXYC/ohmysmsapp/backend/internal/logging"
+	"github.com/KimmyXYC/ohmysmsapp/backend/internal/modem"
+	"github.com/KimmyXYC/ohmysmsapp/backend/internal/ws"
 )
 
 // 编译期注入。Makefile 会通过 -ldflags 替换。
@@ -29,6 +34,21 @@ var (
 )
 
 func main() {
+	// 子命令：hash-password
+	if len(os.Args) >= 2 && os.Args[1] == "hash-password" {
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: ohmysmsd hash-password <password>")
+			os.Exit(2)
+		}
+		h, err := auth.HashPassword(os.Args[2])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hash failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(h)
+		return
+	}
+
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
 		os.Exit(1)
@@ -66,7 +86,29 @@ func run() error {
 	defer conn.Close()
 	log.Info("database ready")
 
-	// 启动 ModemManager 集成：cfg.Modem.Enabled=true 走 DBus；否则跑 mock。
+	// Auth service：jwt_secret 为空则运行期随机生成（仅内存），告警用户
+	jwtSecret := cfg.Auth.JWTSecret
+	if jwtSecret == "" {
+		gen, err := auth.GenerateSecret()
+		if err != nil {
+			return fmt.Errorf("generate jwt secret: %w", err)
+		}
+		jwtSecret = gen
+		log.Warn("auth.jwt_secret is empty; generated an ephemeral one — "+
+			"tokens will invalidate on restart. set auth.jwt_secret in config.yaml for persistence",
+			"hint_secret", gen[:8]+"...")
+	}
+	authSvc, err := auth.New(auth.Config{
+		Secret:         []byte(jwtSecret),
+		Username:       cfg.Auth.Username,
+		PasswordBcrypt: cfg.Auth.PasswordBcrypt,
+		TokenTTL:       cfg.Auth.TokenTTL,
+	}, log)
+	if err != nil {
+		return fmt.Errorf("init auth: %w", err)
+	}
+
+	// Provider
 	var provider modem.Provider
 	if cfg.Modem.Enabled {
 		provider = modem.NewMMProvider(log, 256)
@@ -85,15 +127,20 @@ func run() error {
 		}
 	}()
 
-	// TODO(stage-3): 启动 WS hub
-	// TODO(stage-5): 启动 Telegram bot
-	// TODO(stage-6): 初始化 ESIM runner
+	// WebSocket hub
+	hub := ws.NewHub(runner, authSvc, log, cfg.Server.AllowedOrigins)
+	go hub.Run(rootCtx)
 
 	handler := httpapi.NewRouter(httpapi.Deps{
 		Version:     version,
 		WebRoot:     cfg.Server.WebRoot,
 		Modem:       provider,
 		ModemRunner: runner,
+		Store:       modemStore,
+		Auth:        authSvc,
+		WSHandler:   hub,
+		Server:      cfg.Server,
+		Telegram:    cfg.Telegram,
 	})
 	srv := &http.Server{
 		Addr:              cfg.Server.Listen,

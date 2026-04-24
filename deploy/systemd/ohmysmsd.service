@@ -1,6 +1,6 @@
 [Unit]
 Description=ohmysmsd - SMS management daemon
-Documentation=https://github.com/kimmy/ohmysmsapp
+Documentation=https://github.com/KimmyXYC/ohmysmsapp
 After=network-online.target ModemManager.service
 Wants=network-online.target
 # ModemManager 必须在线才能发现模块；如果 MM 重启我们也跟着重启。

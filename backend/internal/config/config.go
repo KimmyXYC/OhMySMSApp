@@ -23,9 +23,10 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Listen   string `yaml:"listen"`
-	WebRoot  string `yaml:"web_root"`
-	BasePath string `yaml:"base_path"`
+	Listen         string   `yaml:"listen"`
+	WebRoot        string   `yaml:"web_root"`
+	BasePath       string   `yaml:"base_path"`
+	AllowedOrigins []string `yaml:"allowed_origins"` // CORS 白名单；空=同源
 }
 
 type DatabaseConfig struct {

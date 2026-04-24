@@ -32,6 +32,9 @@ node_modules/
 !.env.example
 config.local.yaml
 config.prod.yaml
+# ohmysmsd runtime config (use config.example.yaml as template)
+backend/config.yaml
+/config.yaml
 
 # Build artifacts
 /deploy/build/
