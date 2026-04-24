@@ -1,0 +1,53 @@
+# ohmysmsd 配置样例（拷贝为 config.yaml 使用）
+
+server:
+  # HTTP 监听地址。默认监听全部接口 8080 端口。
+  listen: "0.0.0.0:8080"
+  # 静态 Web 文件目录（Vue dist），留空则不托管静态站点。
+  web_root: "./web"
+  # 基础路径（反向代理场景可改）。
+  base_path: "/"
+
+database:
+  # SQLite 文件路径。目录不存在会自动创建。
+  path: "./data/ohmysmsapp.db"
+
+auth:
+  # JWT 签名密钥（bytes，≥32）。首次启动若为空会自动生成到该文件相邻目录。
+  jwt_secret: ""
+  # 单用户模式的登录用户名。
+  username: "admin"
+  # 登录密码的 bcrypt hash；通过 `ohmysmsd hash-password` 生成。
+  password_bcrypt: ""
+  # Token 有效期（Go duration）。
+  token_ttl: "720h"
+
+modem:
+  # 是否启用 ModemManager DBus 客户端。开发机本地调试时可关闭走 mock。
+  enabled: true
+  # 信号采样周期。
+  signal_poll: "30s"
+
+telegram:
+  # Bot Token，从 @BotFather 获取。留空关闭 Bot 子系统。
+  bot_token: ""
+  # 允许使用的单个 chat_id（私聊或群组 ID）。
+  chat_id: 0
+  # 收到短信后是否自动推送到上述 chat。
+  push_sms: true
+
+esim:
+  # lpac 可执行文件路径。
+  lpac_bin: "/usr/local/bin/lpac"
+  # 切换 profile 期间是否对目标模块执行 mmcli --inhibit。
+  inhibit_modem_manager: true
+  # 已知卡商 → AID 覆盖（留空使用默认）。
+  aids:
+    fiveber: "A0000005591010000000008900000300" # 占位，首次探测后落实
+    nineesim: ""
+
+logging:
+  # debug / info / warn / error
+  level: "info"
+  # text / json
+  format: "text"

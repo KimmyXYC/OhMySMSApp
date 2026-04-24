@@ -1,0 +1,11 @@
+// Element Plus SCSS 变量覆盖
+// 按需引入时会自动注入此文件
+// 参考：https://element-plus.org/en-US/guide/theming.html
+
+@forward 'element-plus/theme-chalk/src/common/var.scss' with (
+  $colors: (
+    'primary': (
+      'base': #409eff,
+    ),
+  ),
+);

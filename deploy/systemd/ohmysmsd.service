@@ -1,0 +1,43 @@
+[Unit]
+Description=ohmysmsd - SMS management daemon
+Documentation=https://github.com/kimmy/ohmysmsapp
+After=network-online.target ModemManager.service
+Wants=network-online.target
+# ModemManager 必须在线才能发现模块；如果 MM 重启我们也跟着重启。
+Requires=ModemManager.service
+PartOf=ModemManager.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/ohmysmsapp
+ExecStart=/opt/ohmysmsapp/bin/ohmysmsd -config /opt/ohmysmsapp/config.yaml
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+# 需要 root 访问 DBus System bus 上的 ModemManager1（默认 policy 允许 root/网络管理组）
+# 以及 /dev/cdc-wdm* /dev/ttyUSB* 等。如后续降权，改为专用用户 + polkit rules。
+
+# 资源 & 安全
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/ohmysmsapp/data /opt/ohmysmsapp/web
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+# 需要访问串口/WDM 设备；若 User=改成非 root 需加 SupplementaryGroups=dialout
+DeviceAllow=/dev/cdc-wdm0 rw
+DeviceAllow=/dev/cdc-wdm1 rw
+DeviceAllow=/dev/cdc-wdm2 rw
+DeviceAllow=/dev/cdc-wdm3 rw
+DeviceAllow=/dev/cdc-wdm4 rw
+DeviceAllow=/dev/ttyUSB* rw
+
+[Install]
+WantedBy=multi-user.target
