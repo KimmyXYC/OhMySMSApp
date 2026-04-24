@@ -5,6 +5,7 @@ go 1.25.8
 require (
 	github.com/coder/websocket v1.8.14
 	github.com/go-chi/chi/v5 v5.2.5
+	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
 	github.com/godbus/dbus/v5 v5.2.2
 	golang.org/x/crypto v0.50.0
 	gopkg.in/yaml.v3 v3.0.1

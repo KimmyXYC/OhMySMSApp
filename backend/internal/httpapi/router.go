@@ -12,6 +12,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"path/filepath"
@@ -24,6 +25,12 @@ import (
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/config"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/modem"
 )
+
+// TelegramReloader 仅暴露 Reload 方法，避免 httpapi → telegram 反向依赖。
+// main.go 把 *telegram.Controller 作为此接口注入。
+type TelegramReloader interface {
+	Reload(ctx context.Context, cfg config.TelegramConfig) error
+}
 
 // Deps 聚合 HTTP 层依赖。
 type Deps struct {
@@ -42,6 +49,9 @@ type Deps struct {
 	// 运行期配置的只读快照（CORS / telegram 等）
 	Server   config.ServerConfig
 	Telegram config.TelegramConfig
+
+	// 可选：PUT /api/settings/telegram 保存后触发热重载；nil 则跳过
+	TelegramCtl TelegramReloader
 }
 
 // NewRouter 组装路由。

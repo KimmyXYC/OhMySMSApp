@@ -72,6 +72,14 @@ func registerSettings(r chi.Router, deps Deps) {
 			writeError(w, http.StatusInternalServerError, "db_error", err.Error())
 			return
 		}
+		// 热重载：token/chat_id/push_sms 任一变更都重启 bot。
+		if deps.TelegramCtl != nil {
+			if err := deps.TelegramCtl.Reload(req.Context(), cur); err != nil {
+				// 记录但不阻塞 PUT 成功返回——settings 已保存
+				// （日志由 Reload 内部 log 输出）
+				_ = err
+			}
+		}
 		writeJSON(w, http.StatusOK, telegramDTO{
 			HasToken: cur.BotToken != "",
 			ChatID:   cur.ChatID,

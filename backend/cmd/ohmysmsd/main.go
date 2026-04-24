@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/httpapi"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/logging"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/modem"
+	"github.com/KimmyXYC/ohmysmsapp/backend/internal/telegram"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/ws"
 )
 
@@ -131,6 +133,14 @@ func run() error {
 	hub := ws.NewHub(runner, authSvc, log, cfg.Server.AllowedOrigins)
 	go hub.Run(rootCtx)
 
+	// Telegram Bot
+	tgCfg := loadTelegramConfig(rootCtx, cfg.Telegram, modemStore)
+	tgCtl := telegram.NewController(provider, runner, modemStore, log)
+	if err := tgCtl.Start(rootCtx, tgCfg); err != nil {
+		log.Warn("telegram start failed", "err", err)
+	}
+	defer tgCtl.Stop()
+
 	handler := httpapi.NewRouter(httpapi.Deps{
 		Version:     version,
 		WebRoot:     cfg.Server.WebRoot,
@@ -141,6 +151,7 @@ func run() error {
 		WSHandler:   hub,
 		Server:      cfg.Server,
 		Telegram:    cfg.Telegram,
+		TelegramCtl: tgCtl,
 	})
 	srv := &http.Server{
 		Addr:              cfg.Server.Listen,
@@ -170,4 +181,18 @@ func run() error {
 	_ = srv.Shutdown(shutdownCtx)
 	log.Info("bye")
 	return nil
+}
+
+// loadTelegramConfig 合并 config.yaml 与 settings 表中的 telegram 配置。
+// 策略：settings 表存在时整体覆盖 config.yaml（便于运行时 Web UI 改配置）。
+func loadTelegramConfig(ctx context.Context, fileCfg config.TelegramConfig, store *modem.Store) config.TelegramConfig {
+	raw, err := store.GetSetting(ctx, "telegram")
+	if err != nil || raw == "" {
+		return fileCfg
+	}
+	var saved config.TelegramConfig
+	if err := json.Unmarshal([]byte(raw), &saved); err != nil {
+		return fileCfg
+	}
+	return saved
 }
