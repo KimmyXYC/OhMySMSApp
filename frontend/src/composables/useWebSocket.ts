@@ -1,24 +1,32 @@
-import { ref, onUnmounted } from 'vue'
+import { ref } from 'vue'
+import { ElNotification } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
+import { useBackendStore } from '@/stores/backend'
 import { useModemsStore } from '@/stores/modems'
 import { useSmsStore } from '@/stores/sms'
 import { useSimsStore } from '@/stores/sims'
-import type { WsMessage, Modem, Sms, SignalSample, Sim } from '@/types/api'
+import type { WsMessage, ModemState, SignalSample } from '@/types/api'
+import router from '@/router'
 
-const RECONNECT_DELAYS = [1000, 2000, 5000, 10000, 30000] // ms
+const RECONNECT_DELAYS = [1000, 2000, 5000, 10000, 30000]
 
 /** 全局单例 */
 let ws: WebSocket | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let reconnectAttempt = 0
 
+export type WsStatus = 'connected' | 'reconnecting' | 'disconnected'
+
+const status = ref<WsStatus>('disconnected')
 const connected = ref(false)
 
 export function useWebSocket() {
   function getWsUrl(): string {
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const token = useAuthStore().token
-    return `${proto}//${location.host}/ws?token=${encodeURIComponent(token || '')}`
+    const backendStore = useBackendStore()
+    const authStore = useAuthStore()
+    const wsBase = backendStore.resolvedWsBase
+    const token = authStore.token
+    return `${wsBase}/ws?token=${encodeURIComponent(token || '')}`
   }
 
   function connect() {
@@ -28,9 +36,11 @@ export function useWebSocket() {
 
     const url = getWsUrl()
     ws = new WebSocket(url)
+    status.value = 'reconnecting'
 
     ws.onopen = () => {
       connected.value = true
+      status.value = 'connected'
       reconnectAttempt = 0
       console.info('[WS] connected')
     }
@@ -39,7 +49,10 @@ export function useWebSocket() {
       connected.value = false
       console.warn('[WS] closed', e.code, e.reason)
       if (e.code !== 1000) {
+        status.value = 'reconnecting'
         scheduleReconnect()
+      } else {
+        status.value = 'disconnected'
       }
     }
 
@@ -67,6 +80,7 @@ export function useWebSocket() {
       ws = null
     }
     connected.value = false
+    status.value = 'disconnected'
   }
 
   function scheduleReconnect() {
@@ -86,38 +100,81 @@ export function useWebSocket() {
     const simsStore = useSimsStore()
 
     switch (msg.type) {
+      case 'hello':
+        console.info('[WS] server version:', msg.data?.server_version)
+        break
+
       case 'modem.added':
       case 'modem.updated':
-        modemsStore.upsertModem(msg.payload as Modem)
+        modemsStore.handleModemState(msg.data as ModemState)
         break
+
       case 'modem.removed':
-        modemsStore.removeModem((msg.payload as { id: number }).id)
+        modemsStore.handleModemRemoved((msg.data as { device_id: string }).device_id)
         break
-      case 'signal.update': {
-        const signal = msg.payload as SignalSample
-        const modem = modemsStore.modems.find((m) => m.id === signal.modem_id)
-        if (modem) {
-          modem.signal = signal
+
+      case 'signal.sample':
+        modemsStore.handleSignalSample(msg.data as SignalSample)
+        break
+
+      case 'sim.updated': {
+        // 刷新 sims & modems
+        simsStore.fetchSims()
+        modemsStore.fetchModems()
+        break
+      }
+
+      case 'sms.received': {
+        const smsData = msg.data as { device_id: string; sms: any }
+        const peer = smsData.sms?.peer || ''
+        const text = smsData.sms?.text || smsData.sms?.body || ''
+
+        // 全局通知
+        ElNotification({
+          title: `新短信 ${peer}`,
+          message: text.length > 80 ? text.slice(0, 80) + '...' : text,
+          type: 'info',
+          duration: 5000,
+          onClick: () => {
+            router.push({ name: 'sms', query: { peer } })
+          },
+        })
+
+        // 如果当前正在看这个 peer 的会话，刷新
+        const currentPeer = smsStore.currentMessages[0]?.peer
+        if (currentPeer === peer) {
+          smsStore.refreshCurrentThread(peer)
+        } else {
+          // 标记未读
+          smsStore.markUnread(peer)
+        }
+
+        // 刷新 threads 列表
+        smsStore.fetchThreads()
+        break
+      }
+
+      case 'sms.state_changed': {
+        // 刷新当前消息
+        if (smsStore.currentMessages.length > 0) {
+          const peer = smsStore.currentMessages[0].peer
+          smsStore.refreshCurrentThread(peer)
         }
         break
       }
-      case 'sms.new':
-        smsStore.addIncomingSms(msg.payload as Sms)
+
+      case 'ussd.state':
+        // 由 UssdView 自己通过 watch 处理
         break
-      case 'sim.updated':
-        simsStore.upsertSim(msg.payload as Sim)
-        break
+
       default:
         console.debug('[WS] unhandled message type:', msg.type)
     }
   }
 
-  onUnmounted(() => {
-    // 组件卸载时不断开全局连接，只在 logout 时断开
-  })
-
   return {
     connected,
+    status,
     connect,
     disconnect,
   }

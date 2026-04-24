@@ -1,17 +1,17 @@
 <script setup lang="ts">
 import { useRouter } from 'vue-router'
-import type { Modem } from '@/types/api'
+import type { ModemRow } from '@/types/api'
 import SignalBars from './SignalBars.vue'
 import SimBadge from './SimBadge.vue'
 
 const props = defineProps<{
-  modem: Modem
+  modem: ModemRow
 }>()
 
 const router = useRouter()
 
 function goDetail() {
-  router.push({ name: 'modem-detail', params: { id: props.modem.id } })
+  router.push({ name: 'modem-detail', params: { deviceId: props.modem.device_id } })
 }
 </script>
 

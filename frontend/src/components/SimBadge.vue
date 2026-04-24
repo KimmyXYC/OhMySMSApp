@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import type { Sim } from '@/types/api'
+import type { SimRow } from '@/types/api'
 
 defineProps<{
-  sim: Sim
+  sim: SimRow
   compact?: boolean
 }>()
 

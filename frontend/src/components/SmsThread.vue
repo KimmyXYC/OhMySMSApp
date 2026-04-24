@@ -1,10 +1,17 @@
 <script setup lang="ts">
-import type { Sms } from '@/types/api'
+import { ref, nextTick, watch, onMounted } from 'vue'
+import type { SMSRow } from '@/types/api'
 
-defineProps<{
-  messages: Sms[]
+const props = defineProps<{
+  messages: SMSRow[]
   peer: string
 }>()
+
+const emit = defineEmits<{
+  (e: 'delete', id: number): void
+}>()
+
+const scrollContainer = ref<HTMLElement>()
 
 function formatTime(ts: string): string {
   const d = new Date(ts)
@@ -15,6 +22,28 @@ function formatTime(ts: string): string {
     minute: '2-digit',
   })
 }
+
+function scrollToBottom() {
+  nextTick(() => {
+    if (scrollContainer.value) {
+      scrollContainer.value.scrollTop = scrollContainer.value.scrollHeight
+    }
+  })
+}
+
+function handleContextMenu(e: MouseEvent, msg: SMSRow) {
+  e.preventDefault()
+  if (confirm(`删除这条消息？\n"${msg.body.slice(0, 50)}..."`)) {
+    emit('delete', msg.id)
+  }
+}
+
+watch(
+  () => props.messages.length,
+  () => scrollToBottom(),
+)
+
+onMounted(() => scrollToBottom())
 </script>
 
 <template>
@@ -23,7 +52,7 @@ function formatTime(ts: string): string {
       <span class="sms-thread__peer">{{ peer }}</span>
     </div>
 
-    <div class="sms-thread__messages">
+    <div ref="scrollContainer" class="sms-thread__messages">
       <div
         v-for="msg in messages"
         :key="msg.id"
@@ -32,6 +61,7 @@ function formatTime(ts: string): string {
           'sms-thread__bubble--outbound': msg.direction === 'outbound',
           'sms-thread__bubble--inbound': msg.direction === 'inbound',
         }"
+        @contextmenu="handleContextMenu($event, msg)"
       >
         <div class="sms-thread__bubble-body">{{ msg.body }}</div>
         <div class="sms-thread__bubble-meta">
@@ -41,7 +71,7 @@ function formatTime(ts: string): string {
             :type="msg.state === 'sent' ? 'success' : msg.state === 'failed' ? 'danger' : 'info'"
             size="small"
           >
-            {{ msg.state === 'sent' ? '已发送' : msg.state === 'failed' ? '失败' : '发送中' }}
+            {{ msg.state === 'sent' ? '已发送' : msg.state === 'failed' ? '失败' : msg.state === 'sending' ? '发送中' : msg.state }}
           </el-tag>
         </div>
       </div>
@@ -53,10 +83,15 @@ function formatTime(ts: string): string {
 
 <style scoped lang="scss">
 .sms-thread {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+
   &__header {
     padding: 12px 0;
     border-bottom: 1px solid var(--el-border-color-light);
     margin-bottom: 16px;
+    flex-shrink: 0;
   }
 
   &__peer {
@@ -69,6 +104,9 @@ function formatTime(ts: string): string {
     flex-direction: column;
     gap: 10px;
     padding: 0 4px;
+    overflow-y: auto;
+    flex: 1;
+    min-height: 0;
   }
 
   &__bubble {
@@ -77,18 +115,25 @@ function formatTime(ts: string): string {
     border-radius: 16px;
     font-size: 14px;
     line-height: 1.5;
+    cursor: default;
+    user-select: text;
 
     &--inbound {
       align-self: flex-start;
-      background: var(--el-fill-color-light);
+      background: var(--ohmysms-bubble-inbound);
       border-bottom-left-radius: 4px;
     }
 
     &--outbound {
       align-self: flex-end;
-      background: var(--el-color-primary-light-7);
+      background: var(--ohmysms-bubble-outbound);
       border-bottom-right-radius: 4px;
     }
+  }
+
+  &__bubble-body {
+    word-break: break-word;
+    white-space: pre-wrap;
   }
 
   &__bubble-meta {

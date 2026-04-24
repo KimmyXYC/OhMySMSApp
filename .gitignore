@@ -10,6 +10,9 @@ node_modules/
 /frontend/dist/
 .vite/
 *.local
+# unplugin-auto-import / unplugin-vue-components 生成的类型声明
+frontend/src/auto-imports.d.ts
+frontend/src/components.d.ts
 
 # IDE
 .idea/

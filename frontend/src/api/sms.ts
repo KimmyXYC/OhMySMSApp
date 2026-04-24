@@ -1,26 +1,32 @@
-import client from './client'
-import type { Sms, SmsThread, SmsSendRequest, Paginated } from '@/types/api'
+import { getClient } from './client'
+import type { SMSRow, ThreadRow, SmsSendRequest, ListResponse } from '@/types/api'
 
-/** 获取短信列表（分页） */
-export function listSms(params: { sim_id?: number; page?: number; per_page?: number }) {
-  return client.get<Paginated<Sms>>('/sms', { params })
+export interface SmsListParams {
+  sim_id?: number
+  device_id?: string
+  peer?: string
+  direction?: string
+  since?: string
+  limit?: number
+  offset?: number
+}
+
+/** 获取短信列表（支持过滤） */
+export function listSms(params: SmsListParams) {
+  return getClient().get<ListResponse<SMSRow>>('/sms', { params })
 }
 
 /** 获取会话列表 */
-export function listThreads(simId?: number) {
-  return client.get<SmsThread[]>('/sms/threads', {
-    params: simId ? { sim_id: simId } : undefined,
-  })
-}
-
-/** 获取某会话的完整消息 */
-export function getThread(simId: number, peer: string) {
-  return client.get<Sms[]>('/sms/thread', {
-    params: { sim_id: simId, peer },
-  })
+export function listThreads(params?: { sim_id?: number; device_id?: string }) {
+  return getClient().get<ListResponse<ThreadRow>>('/sms/threads', { params })
 }
 
 /** 发送短信 */
 export function sendSms(data: SmsSendRequest) {
-  return client.post<Sms>('/sms/send', data)
+  return getClient().post<SMSRow>('/sms/send', data)
+}
+
+/** 删除短信 */
+export function deleteSms(id: number) {
+  return getClient().delete(`/sms/${id}`)
 }

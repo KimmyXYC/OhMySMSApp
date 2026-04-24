@@ -1,8 +1,39 @@
 // ─── types/api.ts ───
-// 前后端共享类型定义，与 backend/migrations/0001_init.sql 对齐
+// 前后端共享类型，严格对齐后端蛇形字段命名
 
-/** 4G Modem 模块 */
-export interface Modem {
+// ───────────── 通用 ─────────────
+
+/** 通用列表响应包装 */
+export interface ListResponse<T> {
+  items: T[]
+  total: number
+  limit?: number
+  offset?: number
+}
+
+/** API 错误体 */
+export interface ApiError {
+  error: string
+  code?: string
+}
+
+// ───────────── Auth ─────────────
+
+export interface LoginRequest {
+  username: string
+  password: string
+}
+
+export interface LoginResponse {
+  token: string
+  expires_at: string
+  user: { username: string }
+}
+
+// ───────────── Modem (DB Row) ─────────────
+
+/** ModemRow — 来自 GET /api/modems */
+export interface ModemRow {
   id: number
   device_id: string
   dbus_path: string | null
@@ -19,13 +50,64 @@ export interface Modem {
   present: boolean
   first_seen_at: string
   last_seen_at: string
-  // 运行时关联（API 可能 join 或 nest）
-  sim?: Sim | null
-  signal?: SignalSample | null
+  sim?: SimRow | null
+  signal?: SignalRow | null
 }
 
-/** SIM 卡 / eSIM Profile */
-export interface Sim {
+// ───────────── ModemState (WS 推送快照) ─────────────
+
+export interface Port {
+  name: string
+  type: string
+}
+
+/** ModemState — WS modem.added / modem.updated 的 data */
+export interface ModemState {
+  device_id: string
+  dbus_path: string
+  manufacturer: string
+  model: string
+  revision: string
+  hardware_revision: string
+  plugin: string
+  imei: string
+  primary_port: string
+  ports: Port[]
+  usb_path: string
+  state: string
+  failed_reason: string
+  power_state: string
+  access_tech: string[]
+  signal_quality: number
+  signal_recent: boolean
+  registration: string
+  operator_id: string
+  operator_name: string
+  own_numbers: string[]
+  has_sim: boolean
+  sim?: SimState | null
+  has_ussd: boolean
+  has_signal: boolean
+  has_messaging: boolean
+  supported_storages: string[]
+}
+
+/** SimState — 来自 WS sim.updated */
+export interface SimState {
+  dbus_path: string
+  iccid: string
+  imsi: string
+  eid: string
+  operator_id: string
+  operator_name: string
+  active: boolean
+  emergency_numbers: string[]
+  sim_type: string
+}
+
+// ───────────── SIM (DB Row) ─────────────
+
+export interface SimRow {
   id: number
   iccid: string
   imsi: string | null
@@ -40,25 +122,15 @@ export interface Sim {
   last_seen_at: string
 }
 
-/** Sticker eSIM 物理卡片 */
-export interface ESimCard {
-  id: number
-  eid: string | null
-  vendor: string | null
-  nickname: string | null
-  notes: string | null
-  created_at: string
-  // 运行时嵌套
-  profiles?: Sim[]
-}
+// ───────────── SMS ─────────────
 
-/** 短信 */
-export interface Sms {
+/** SMSRow — 来自 DB (GET /api/sms) */
+export interface SMSRow {
   id: number
   sim_id: number | null
   modem_id: number | null
   direction: 'inbound' | 'outbound'
-  state: 'received' | 'sending' | 'sent' | 'failed' | 'stored'
+  state: string
   peer: string
   body: string
   ext_id: string | null
@@ -69,35 +141,88 @@ export interface Sms {
   pushed_to_tg: boolean
 }
 
-/** 短信会话（按 peer 聚合） */
-export interface SmsThread {
+/** ThreadRow — 来自 GET /api/sms/threads */
+export interface ThreadRow {
   peer: string
-  sim_id: number
-  last_message: Sms
-  unread_count: number
-  messages: Sms[]
+  sim_id: number | null
+  last_text: string
+  last_time: string
+  count: number
+  direction: string
+  state: string
 }
 
-/** USSD 会话 */
-export interface UssdSession {
+/** SMSRecord — WS sms.received 的 sms 字段 (来自 provider) */
+export interface SMSRecord {
+  ext_id: string
+  direction: string
+  state: string
+  peer: string
+  text: string
+  smsc: string
+  timestamp: string
+  storage: string
+  delivery_state: number
+}
+
+export interface SmsSendRequest {
+  device_id: string
+  peer: string
+  body: string
+}
+
+// ───────────── USSD ─────────────
+
+export interface UssdInitRequest {
+  device_id: string
+  command: string
+}
+
+/** USSD HTTP 响应 */
+export interface UssdResponse {
+  session_id: string
+  reply: string
+  state: string
+  network_request?: string
+  network_notification?: string
+  device_id?: string
+  session_row_id?: number
+  started_at?: string
+}
+
+/** USSDRow — 来自 DB (GET /api/ussd/sessions) */
+export interface USSDRow {
   id: number
   sim_id: number | null
   modem_id: number | null
   initial_request: string
-  state: 'active' | 'user_response' | 'terminated' | 'failed'
+  state: string
   transcript: UssdTurn[]
   started_at: string
   ended_at: string | null
 }
 
 export interface UssdTurn {
-  dir: 'request' | 'response'
+  dir: string // "out" | "in" | "notification" | "request" | "response"
   ts: string
   text: string
 }
 
-/** 信号采样 */
-export interface SignalSample {
+/** USSDState — WS ussd.state 的 data.ussd */
+export interface USSDState {
+  session_id: string
+  device_id: string
+  state: string
+  last_request: string
+  last_response: string
+  network_request: string
+  network_notification: string
+}
+
+// ───────────── Signal ─────────────
+
+/** SignalRow — 来自 DB */
+export interface SignalRow {
   id: number
   modem_id: number
   sim_id: number | null
@@ -105,85 +230,60 @@ export interface SignalSample {
   rssi_dbm: number | null
   rsrp_dbm: number | null
   rsrq_db: number | null
-  access_tech: 'lte' | 'umts' | 'gsm' | '5gnr' | string | null
-  registration: 'home' | 'roaming' | 'searching' | 'denied' | string | null
+  access_tech: string | null
+  registration: string | null
   operator_id: string | null
   operator_name: string | null
   sampled_at: string
 }
 
-/** Modem ↔ Sim 绑定 */
-export interface ModemSimBinding {
-  modem_id: number
-  sim_id: number
-  bound_at: string
+/** SignalSample — WS signal.sample 的 data (来自 provider) */
+export interface SignalSample {
+  device_id: string
+  quality_pct: number
+  rssi_dbm: number | null
+  rsrp_dbm: number | null
+  rsrq_db: number | null
+  snr_db: number | null
+  access_tech: string
+  registration: string
+  operator_id: string
+  operator_name: string
+  sampled_at: string
 }
 
-/** 通用分页响应 */
-export interface Paginated<T> {
-  items: T[]
-  total: number
-  page: number
-  per_page: number
+// ───────────── Settings ─────────────
+
+export interface TelegramSettings {
+  has_token: boolean
+  chat_id: number
+  push_sms: boolean
+  source: string
 }
 
-/** 认证 */
-export interface LoginRequest {
-  username: string
-  password: string
+export interface TelegramPutRequest {
+  bot_token?: string
+  chat_id?: number
+  push_sms?: boolean
 }
 
-export interface LoginResponse {
-  token: string
+// ───────────── eSIM ─────────────
+
+export interface ESimCard {
+  id: number
+  eid: string | null
+  vendor: string | null
+  nickname: string | null
+  notes: string | null
+  created_at: string
+  profiles?: SimRow[]
 }
 
-/** USSD 请求 */
-export interface UssdInitRequest {
-  modem_id: number
-  command: string
-}
+// ───────────── WebSocket ─────────────
 
-export interface UssdReplyRequest {
-  session_id: number
-  response: string
-}
-
-/** 发送短信请求 */
-export interface SmsSendRequest {
-  modem_id: number
-  peer: string
-  body: string
-}
-
-/** eSIM Profile 操作 */
-export interface ESimProfileAction {
-  esim_card_id: number
-  iccid: string
-  action: 'enable' | 'disable'
-}
-
-export interface ESimSetNickname {
-  esim_card_id: number
-  iccid: string
-  nickname: string
-}
-
-/** WebSocket 消息信封 */
-export interface WsMessage<T = unknown> {
-  type:
-    | 'sms.new'
-    | 'signal.update'
-    | 'modem.added'
-    | 'modem.removed'
-    | 'modem.updated'
-    | 'sim.updated'
-    | 'ussd.update'
-  payload: T
+/** WS 消息信封 (server → client) */
+export interface WsMessage {
+  type: string
+  data: any
   ts: string
-}
-
-/** API 错误体 */
-export interface ApiError {
-  error: string
-  detail?: string
 }

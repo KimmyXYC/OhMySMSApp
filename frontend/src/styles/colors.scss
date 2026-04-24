@@ -1,0 +1,103 @@
+/* ─── colors.scss ───────────────────────────────────────────
+ * OhMySMS 淡蓝色配色系统 — 所有自定义颜色变量集中在此
+ * 修改配色只需编辑此文件
+ * ──────────────────────────────────────────────────────────── */
+
+:root {
+  /* ─── 主色 Primary（淡蓝） ─── */
+  --ohmysms-primary: #60a5fa;
+  --ohmysms-primary-hover: #3b82f6;
+  --ohmysms-primary-active: #2563eb;
+  --ohmysms-primary-light: rgba(96, 165, 250, 0.12);
+  --ohmysms-primary-light-2: rgba(96, 165, 250, 0.08);
+
+  /* ─── 语义色 ─── */
+  --ohmysms-success: #10b981;
+  --ohmysms-warning: #f59e0b;
+  --ohmysms-danger: #f87171;
+  --ohmysms-info: #38bdf8;
+
+  /* ─── 背景 ─── */
+  --ohmysms-bg-page: #f1f5f9;
+  --ohmysms-bg-card: #ffffff;
+  --ohmysms-bg-header: #f8fafc;
+  --ohmysms-bg-aside: #ffffff;
+
+  /* ─── 信号条梯度 ─── */
+  --ohmysms-signal-weak: #f87171;
+  --ohmysms-signal-mid: #f59e0b;
+  --ohmysms-signal-strong: #60a5fa;
+
+  /* ─── WS 状态 ─── */
+  --ohmysms-ws-connected: #60a5fa;
+  --ohmysms-ws-reconnecting: #f59e0b;
+  --ohmysms-ws-disconnected: #f87171;
+
+  /* ─── 消息气泡 ─── */
+  --ohmysms-bubble-outbound: #dbeafe;
+  --ohmysms-bubble-inbound: #f1f5f9;
+
+  /* ─── 统计卡渐变 ─── */
+  --ohmysms-stat-gradient: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
+  --ohmysms-stat-accent: #60a5fa;
+
+  /* ─── 文字 ─── */
+  --ohmysms-text-primary: #1e293b;
+  --ohmysms-text-secondary: #64748b;
+
+  /* ─── 登录页背景 ─── */
+  --ohmysms-login-bg: linear-gradient(145deg, #dbeafe 0%, #e0e7ff 40%, #f0f9ff 100%);
+
+  /* ─── 在线点 ─── */
+  --ohmysms-online-dot: #60a5fa;
+  --ohmysms-online-glow: rgba(96, 165, 250, 0.6);
+}
+
+/* ─── 深色模式 ─── */
+html.dark {
+  --ohmysms-primary: #7dd3fc;
+  --ohmysms-primary-hover: #60a5fa;
+  --ohmysms-primary-active: #38bdf8;
+  --ohmysms-primary-light: rgba(125, 211, 252, 0.12);
+  --ohmysms-primary-light-2: rgba(125, 211, 252, 0.06);
+
+  --ohmysms-bg-page: #0f172a;
+  --ohmysms-bg-card: #1e293b;
+  --ohmysms-bg-header: #1e293b;
+  --ohmysms-bg-aside: #1e293b;
+
+  --ohmysms-signal-strong: #7dd3fc;
+  --ohmysms-ws-connected: #7dd3fc;
+
+  --ohmysms-bubble-outbound: #1e3a5f;
+  --ohmysms-bubble-inbound: #334155;
+
+  --ohmysms-stat-gradient: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+  --ohmysms-stat-accent: #7dd3fc;
+
+  --ohmysms-text-primary: #e2e8f0;
+  --ohmysms-text-secondary: #94a3b8;
+
+  --ohmysms-login-bg: linear-gradient(145deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+
+  --ohmysms-online-dot: #7dd3fc;
+  --ohmysms-online-glow: rgba(125, 211, 252, 0.5);
+
+  /* Element Plus dark mode overrides for light-blue tint */
+  --el-bg-color: #1e293b;
+  --el-bg-color-page: #0f172a;
+  --el-bg-color-overlay: #1e293b;
+  --el-border-color: #334155;
+  --el-border-color-light: #334155;
+  --el-border-color-lighter: #2d3a4e;
+  --el-border-color-extra-light: #253346;
+  --el-fill-color: #334155;
+  --el-fill-color-light: #2d3a4e;
+  --el-fill-color-lighter: #253346;
+  --el-fill-color-extra-light: #1e293b;
+  --el-text-color-primary: #e2e8f0;
+  --el-text-color-regular: #cbd5e1;
+  --el-text-color-secondary: #94a3b8;
+  --el-text-color-placeholder: #64748b;
+  --el-text-color-disabled: #475569;
+}

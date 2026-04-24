@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { onMounted, computed } from 'vue'
 import { useModemsStore } from '@/stores/modems'
 import { useSimsStore } from '@/stores/sims'
 import ModemCard from '@/components/ModemCard.vue'
@@ -7,6 +7,8 @@ import { Refresh } from '@element-plus/icons-vue'
 
 const modemsStore = useModemsStore()
 const simsStore = useSimsStore()
+
+const activeSims = computed(() => simsStore.sims.length)
 
 onMounted(async () => {
   await Promise.all([modemsStore.fetchModems(), simsStore.fetchSims()])
@@ -28,23 +30,30 @@ function handleRefresh() {
     <!-- 统计卡片 -->
     <el-row :gutter="16" class="dashboard-stats">
       <el-col :xs="12" :sm="6">
-        <el-card shadow="hover">
+        <el-card shadow="hover" class="stat-card">
+          <div class="stat-card__accent" />
           <el-statistic title="模块总数" :value="modemsStore.modems.length" />
         </el-card>
       </el-col>
       <el-col :xs="12" :sm="6">
-        <el-card shadow="hover">
-          <el-statistic title="在线" :value="modemsStore.onlineModems.length" />
+        <el-card shadow="hover" class="stat-card stat-card--online">
+          <div class="stat-card__accent stat-card__accent--online" />
+          <div class="stat-with-dot">
+            <span class="stat-dot stat-dot--online" />
+            <el-statistic title="在线" :value="modemsStore.onlineModems.length" />
+          </div>
         </el-card>
       </el-col>
       <el-col :xs="12" :sm="6">
-        <el-card shadow="hover">
-          <el-statistic title="离线" :value="modemsStore.offlineModems.length" />
+        <el-card shadow="hover" class="stat-card">
+          <div class="stat-card__accent stat-card__accent--info" />
+          <el-statistic title="已插卡" :value="modemsStore.modemsWithSim.length" />
         </el-card>
       </el-col>
       <el-col :xs="12" :sm="6">
-        <el-card shadow="hover">
-          <el-statistic title="SIM 卡" :value="simsStore.sims.length" />
+        <el-card shadow="hover" class="stat-card">
+          <div class="stat-card__accent stat-card__accent--success" />
+          <el-statistic title="SIM 卡" :value="activeSims" />
         </el-card>
       </el-col>
     </el-row>
@@ -61,28 +70,26 @@ function handleRefresh() {
       style="margin-bottom: 16px"
     />
 
-    <el-skeleton :loading="modemsStore.loading && modemsStore.modems.length === 0" :rows="4" animated>
-      <template #default>
-        <el-row :gutter="16">
-          <el-col
-            v-for="modem in modemsStore.modems"
-            :key="modem.id"
-            :xs="24"
-            :sm="12"
-            :md="8"
-            :lg="6"
-            style="margin-bottom: 16px"
-          >
-            <ModemCard :modem="modem" />
-          </el-col>
-        </el-row>
+    <div v-loading="modemsStore.loading && modemsStore.modems.length === 0">
+      <el-row :gutter="16">
+        <el-col
+          v-for="modem in modemsStore.modems"
+          :key="modem.device_id"
+          :xs="24"
+          :sm="12"
+          :md="8"
+          :lg="6"
+          style="margin-bottom: 16px"
+        >
+          <ModemCard :modem="modem" />
+        </el-col>
+      </el-row>
 
-        <el-empty
-          v-if="modemsStore.modems.length === 0"
-          description="暂无模块，请检查 USB 连接"
-        />
-      </template>
-    </el-skeleton>
+      <el-empty
+        v-if="!modemsStore.loading && modemsStore.modems.length === 0"
+        description="暂无模块，请检查 USB 连接"
+      />
+    </div>
   </div>
 </template>
 
@@ -101,9 +108,63 @@ function handleRefresh() {
 
 .dashboard-stats {
   margin-bottom: 8px;
+}
 
-  .el-card {
-    border-radius: 12px;
+.stat-card {
+  border-radius: 12px;
+  position: relative;
+  overflow: hidden;
+
+  &__accent {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: var(--ohmysms-primary);
+    border-radius: 12px 12px 0 0;
+
+    &--online {
+      background: var(--ohmysms-primary);
+    }
+
+    &--info {
+      background: var(--ohmysms-info);
+    }
+
+    &--success {
+      background: var(--ohmysms-success);
+    }
+  }
+}
+
+.stat-with-dot {
+  position: relative;
+}
+
+.stat-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  position: absolute;
+  top: 4px;
+  right: 4px;
+
+  &--online {
+    background-color: var(--ohmysms-online-dot);
+    box-shadow: 0 0 6px var(--ohmysms-online-glow);
+    animation: pulse-dot 2s infinite;
+  }
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    box-shadow: 0 0 6px var(--ohmysms-online-glow);
+  }
+  50% {
+    box-shadow: 0 0 12px var(--ohmysms-online-glow);
   }
 }
 </style>

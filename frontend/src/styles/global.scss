@@ -1,5 +1,8 @@
 /* ─── global.scss ─── */
 /* 全局基础样式，配合 Element Plus 使用 */
+/* 配色变量：见 ./colors.scss */
+
+@use './colors';
 
 *,
 *::before,
@@ -17,22 +20,22 @@ html {
 
 body {
   font-family:
+    'Inter',
     'PingFang SC',
     'Helvetica Neue',
     Helvetica,
     'Microsoft YaHei',
-    Arial,
     sans-serif;
   line-height: 1.6;
-  color: var(--el-text-color-primary);
-  background-color: var(--el-bg-color);
+  color: var(--ohmysms-text-primary);
+  background-color: var(--ohmysms-bg-page);
   transition:
     color 0.3s,
     background-color 0.3s;
 }
 
 a {
-  color: var(--el-color-primary);
+  color: var(--ohmysms-primary);
   text-decoration: none;
 }
 

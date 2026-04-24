@@ -57,6 +57,7 @@ export default defineConfig(({ mode }) => {
           manualChunks: {
             'element-plus': ['element-plus'],
             vue: ['vue', 'vue-router', 'pinia'],
+            echarts: ['echarts', 'vue-echarts'],
           },
         },
       },

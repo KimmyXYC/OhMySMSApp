@@ -15,9 +15,9 @@ function getLevel(q: number | null): number {
 
 function getColor(q: number | null): string {
   if (q === null) return 'var(--el-text-color-disabled)'
-  if (q >= 60) return 'var(--el-color-success)'
-  if (q >= 30) return 'var(--el-color-warning)'
-  return 'var(--el-color-danger)'
+  if (q >= 60) return 'var(--ohmysms-signal-strong)'
+  if (q >= 30) return 'var(--ohmysms-signal-mid)'
+  return 'var(--ohmysms-signal-weak)'
 }
 </script>
 

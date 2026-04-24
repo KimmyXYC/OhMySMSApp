@@ -15,14 +15,23 @@ const routes: RouteRecordRaw[] = [
     children: [
       {
         path: '',
+        redirect: '/dashboard',
+      },
+      {
+        path: 'dashboard',
         name: 'dashboard',
         component: () => import('@/views/DashboardView.vue'),
       },
       {
-        path: 'modem/:id',
+        path: 'modems/:deviceId',
         name: 'modem-detail',
         component: () => import('@/views/ModemDetailView.vue'),
         props: true,
+      },
+      {
+        path: 'sims',
+        name: 'sims',
+        component: () => import('@/views/SimsView.vue'),
       },
       {
         path: 'sms',
@@ -39,12 +48,16 @@ const routes: RouteRecordRaw[] = [
         name: 'esim',
         component: () => import('@/views/ESimView.vue'),
       },
+      {
+        path: 'settings',
+        name: 'settings',
+        component: () => import('@/views/SettingsView.vue'),
+      },
     ],
   },
-  // 兜底
   {
     path: '/:pathMatch(.*)*',
-    redirect: '/',
+    redirect: '/dashboard',
   },
 ]
 
@@ -53,7 +66,6 @@ const router = createRouter({
   routes,
 })
 
-// 全局前置守卫
 router.beforeEach((to, _from, next) => {
   const auth = useAuthStore()
 

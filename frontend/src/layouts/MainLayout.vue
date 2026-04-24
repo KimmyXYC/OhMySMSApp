@@ -3,6 +3,8 @@ import { ref, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuth } from '@/composables/useAuth'
 import { useWebSocket } from '@/composables/useWebSocket'
+import type { WsStatus } from '@/composables/useWebSocket'
+import BackendSwitcher from '@/components/BackendSwitcher.vue'
 import {
   HomeFilled,
   Message,
@@ -13,25 +15,47 @@ import {
   SwitchButton,
   Moon,
   Sunny,
+  Setting,
+  Iphone,
 } from '@element-plus/icons-vue'
 
 const { logout } = useAuth()
-const { connected } = useWebSocket()
+const { status } = useWebSocket()
 const route = useRoute()
 
 const collapsed = ref(false)
-const isDark = ref(false)
+const isDark = ref(document.documentElement.classList.contains('dark'))
 
 const menuItems = [
-  { index: '/', icon: HomeFilled, label: '控制面板' },
+  { index: '/dashboard', icon: HomeFilled, label: '控制面板' },
   { index: '/sms', icon: Message, label: '短信' },
   { index: '/ussd', icon: Phone, label: 'USSD' },
+  { index: '/sims', icon: Iphone, label: 'SIM 卡' },
   { index: '/esim', icon: CreditCard, label: 'eSIM' },
+  { index: '/settings', icon: Setting, label: '设置' },
 ]
 
 const activeMenu = computed(() => {
-  if (route.path.startsWith('/modem/')) return '/'
+  if (route.path.startsWith('/modems/')) return '/dashboard'
   return route.path
+})
+
+const wsTagType = computed(() => {
+  const map: Record<WsStatus, '' | 'warning' | 'danger'> = {
+    connected: '',
+    reconnecting: 'warning',
+    disconnected: 'danger',
+  }
+  return map[status.value] || 'danger'
+})
+
+const wsLabel = computed(() => {
+  const map: Record<WsStatus, string> = {
+    connected: '已连接',
+    reconnecting: '重连中',
+    disconnected: '已断开',
+  }
+  return map[status.value] || '已断开'
 })
 
 function toggleDark() {
@@ -75,9 +99,13 @@ function toggleDark() {
         </div>
 
         <div class="main-layout__header-right">
+          <!-- 后端切换 -->
+          <BackendSwitcher />
+
           <!-- WS 状态 -->
-          <el-tag :type="connected ? 'success' : 'danger'" size="small" effect="dark" round>
-            {{ connected ? '已连接' : '已断开' }}
+          <el-tag :type="wsTagType" size="small" effect="dark" round class="ws-tag">
+            <span class="ws-dot" :class="'ws-dot--' + status" />
+            {{ wsLabel }}
           </el-tag>
 
           <!-- 深浅色切换 -->
@@ -112,7 +140,7 @@ function toggleDark() {
   min-height: 100vh;
 
   &__aside {
-    background-color: var(--el-bg-color);
+    background-color: var(--ohmysms-bg-aside);
     border-right: 1px solid var(--el-border-color-light);
     transition: width 0.3s;
     overflow: hidden;
@@ -132,11 +160,21 @@ function toggleDark() {
     font-weight: 700;
     letter-spacing: -0.5px;
     white-space: nowrap;
-    color: var(--el-text-color-primary);
+    color: var(--ohmysms-primary);
   }
 
   &__menu {
     border-right: none;
+
+    // Override Element Plus menu active/hover states
+    :deep(.el-menu-item.is-active) {
+      color: var(--ohmysms-primary);
+      background-color: var(--ohmysms-primary-light);
+    }
+
+    :deep(.el-menu-item:hover) {
+      background-color: var(--ohmysms-primary-light-2);
+    }
   }
 
   &__header {
@@ -146,6 +184,7 @@ function toggleDark() {
     height: 56px;
     border-bottom: 1px solid var(--el-border-color-light);
     padding: 0 16px;
+    background-color: var(--ohmysms-bg-header);
   }
 
   &__header-left,
@@ -156,8 +195,50 @@ function toggleDark() {
   }
 
   &__main {
-    background-color: var(--el-bg-color-page);
+    background-color: var(--ohmysms-bg-page);
     min-height: calc(100vh - 56px);
+  }
+}
+
+.ws-tag {
+  // connected → primary style (light blue)
+  &:not(.el-tag--warning):not(.el-tag--danger) {
+    --el-tag-bg-color: var(--ohmysms-primary-light);
+    --el-tag-border-color: var(--ohmysms-primary);
+    --el-tag-text-color: var(--ohmysms-primary);
+  }
+}
+
+.ws-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-right: 4px;
+  vertical-align: middle;
+
+  &--connected {
+    background-color: var(--ohmysms-ws-connected);
+    box-shadow: 0 0 4px var(--ohmysms-online-glow);
+  }
+
+  &--reconnecting {
+    background-color: var(--ohmysms-ws-reconnecting);
+    animation: pulse 1.5s infinite;
+  }
+
+  &--disconnected {
+    background-color: var(--ohmysms-ws-disconnected);
+  }
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
   }
 }
 

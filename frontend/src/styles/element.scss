@@ -1,11 +1,27 @@
-// Element Plus SCSS 变量覆盖
-// 按需引入时会自动注入此文件
-// 参考：https://element-plus.org/en-US/guide/theming.html
+// ──────────────────────────────────────────────
+// Element Plus SCSS 变量覆盖 — 淡蓝色主题
+// 所有配色变量集中定义在此文件
+// ──────────────────────────────────────────────
 
 @forward 'element-plus/theme-chalk/src/common/var.scss' with (
   $colors: (
     'primary': (
-      'base': #409eff,
+      'base': #60a5fa,
+    ),
+    'success': (
+      'base': #10b981,
+    ),
+    'warning': (
+      'base': #f59e0b,
+    ),
+    'danger': (
+      'base': #f87171,
+    ),
+    'error': (
+      'base': #f87171,
+    ),
+    'info': (
+      'base': #38bdf8,
     ),
   ),
 );
