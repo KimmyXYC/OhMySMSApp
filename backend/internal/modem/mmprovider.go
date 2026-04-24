@@ -305,14 +305,44 @@ func (p *MMProvider) initialReconcile(ctx context.Context) error {
 			p.onModemAdded(ctx, path, ifaces)
 		}
 	}
-	// 对所有已订阅 modem 上已有的 SMS 也做一次 reconcile，避免漏接历史。
-	for path, ifaces := range result {
-		if _, ok := ifaces[ifaceSms]; ok {
-			p.onSmsAppeared(path)
-			if rec, err := p.readSMS(conn, path); err == nil {
+	// 对每个已订阅 modem，通过 Messaging.List 拿到它的 SMS paths 并登记，
+	// 以便 onSmsAppeared 在查反查表时能正确关联到 modem。
+	// （GetManagedObjects 的 SMS 对象不携带 modem 关系，单独遍历 SMS 路径无法知道归属）
+	p.mu.RLock()
+	modemsSnap := make([]struct {
+		DevID    string
+		DBusPath string
+	}, 0, len(p.modems))
+	for devID, entry := range p.modems {
+		modemsSnap = append(modemsSnap, struct {
+			DevID    string
+			DBusPath string
+		}{devID, entry.State.DBusPath})
+	}
+	p.mu.RUnlock()
+
+	for _, m := range modemsSnap {
+		modemObj := conn.Object(mmService, dbus.ObjectPath(m.DBusPath))
+		var smsPaths []dbus.ObjectPath
+		if err := modemObj.CallWithContext(ctx, ifaceMessaging+".List", 0).Store(&smsPaths); err != nil {
+			p.log.Debug("messaging list failed during reconcile",
+				"device", m.DevID, "err", err)
+			continue
+		}
+		// 先登记所有该 modem 的 SMS path 到 SMSPaths，再订阅 + 读。
+		p.mu.Lock()
+		if entry, ok := p.modems[m.DevID]; ok {
+			for _, sp := range smsPaths {
+				entry.SMSPaths[sp] = true
+			}
+		}
+		p.mu.Unlock()
+		for _, sp := range smsPaths {
+			p.onSmsAppeared(sp)
+			if rec, err := p.readSMS(conn, sp); err == nil {
 				p.emit(Event{
 					Kind:     EventSMSStateChanged,
-					DeviceID: p.deviceIDForSMSPath(path),
+					DeviceID: m.DevID,
 					Payload:  rec,
 					At:       time.Now(),
 				})
@@ -421,6 +451,11 @@ func (p *MMProvider) onModemAdded(ctx context.Context, path dbus.ObjectPath,
 			}
 			if sim.OperatorID == "" && state.OperatorID != "" {
 				sim.OperatorID = state.OperatorID
+			}
+			// MM 的 Sim 接口没有 MSISDN，号码在 Modem.OwnNumbers 里。
+			// 取第一个作为 MSISDN 展示给前端；注意 MM 不同模块返回格式可能有无 "+" 前缀。
+			if sim.MSISDN == "" && len(state.OwnNumbers) > 0 {
+				sim.MSISDN = normalizeMSISDN(state.OwnNumbers[0])
 			}
 			state.SIM = &sim
 			state.HasSim = true
@@ -669,6 +704,10 @@ func (p *MMProvider) applyModemProps(entry *modemEntry, changed map[string]dbus.
 	if v, ok := changed["OwnNumbers"]; ok {
 		if ss, ok := v.Value().([]string); ok {
 			entry.State.OwnNumbers = append([]string(nil), ss...)
+			// 号码变化时同步更新已绑定 SIM 的 MSISDN 展示字段（MM Sim 接口不含 MSISDN）
+			if entry.State.SIM != nil && len(ss) > 0 {
+				entry.State.SIM.MSISDN = normalizeMSISDN(ss[0])
+			}
 		}
 	}
 }

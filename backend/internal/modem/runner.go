@@ -125,6 +125,15 @@ func (r *Runner) handle(ctx context.Context, ev Event) {
 			} else if simID > 0 {
 				r.setSimID(state.DeviceID, simID)
 			}
+		} else {
+			// SIM 被拔出 / 模块 failed sim-missing：清理 modem↔sim 绑定，
+			// 避免前端 /api/modems 继续 join 出已经不在场的 SIM。
+			if err := r.store.UnbindModem(ctx, id); err != nil {
+				r.log.Debug("unbind modem sim failed", "device", state.DeviceID, "err", err)
+			}
+			r.idCacheMu.Lock()
+			delete(r.simIDs, state.DeviceID)
+			r.idCacheMu.Unlock()
 		}
 		if ev.Kind == EventModemAdded {
 			r.log.Info("modem online",
@@ -136,6 +145,12 @@ func (r *Runner) handle(ctx context.Context, ev Event) {
 		state, _ := ev.Payload.(ModemState)
 		if err := r.store.MarkModemAbsent(ctx, state.DeviceID); err != nil {
 			r.log.Error("mark modem absent failed", "device", state.DeviceID, "err", err)
+		}
+		// 清掉 modem↔sim 绑定，不残留在前端视图里。
+		if id := r.getModemID(ctx, state.DeviceID); id > 0 {
+			if err := r.store.UnbindModem(ctx, id); err != nil {
+				r.log.Debug("unbind on remove failed", "device", state.DeviceID, "err", err)
+			}
 		}
 		r.forgetModem(state.DeviceID)
 		r.log.Info("modem offline", "device", state.DeviceID)

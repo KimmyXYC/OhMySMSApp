@@ -2,6 +2,7 @@ package modem
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/godbus/dbus/v5"
 )
@@ -400,4 +401,29 @@ func signalDictFloat(v dbus.Variant, key string) *float64 {
 		return &f
 	}
 	return nil
+}
+
+// normalizeMSISDN 把 MM Modem.OwnNumbers 返回的号码规整成 E.164 风格：
+//   - 前后空格裁掉
+//   - 全是数字且长度 >= 5（粗略判断）时自动补 "+" 前缀（MM 在部分模块上会丢掉前缀）
+//   - 已经带 "+" 或含其他字符（如 "*100#" 短码）则原样返回
+func normalizeMSISDN(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if s[0] == '+' {
+		return s
+	}
+	allDigits := true
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			allDigits = false
+			break
+		}
+	}
+	if allDigits && len(s) >= 5 {
+		return "+" + s
+	}
+	return s
 }

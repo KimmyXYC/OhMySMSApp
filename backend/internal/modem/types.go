@@ -110,6 +110,7 @@ type SimState struct {
 	ICCID            string   `json:"iccid"`
 	IMSI             string   `json:"imsi"`
 	EID              string   `json:"eid"`
+	MSISDN           string   `json:"msisdn"` // 手机号；MM Sim 接口无此字段，由 modem 层 OwnNumbers 合并得到
 	OperatorID       string   `json:"operator_id"`
 	OperatorName     string   `json:"operator_name"`
 	Active           bool     `json:"active"`

@@ -71,6 +71,18 @@ func (s *Store) MarkModemAbsent(ctx context.Context, deviceID string) error {
 	return err
 }
 
+// UnbindModem 删除 modem 的 modem_sim_bindings 行。
+// 当 SIM 被拔出（HasSim=false）或 modem 下线时调用，避免前端继续看到历史 SIM 绑定。
+// SIM 自身不删（保留短信/信号历史），只断开当前活跃关系。
+func (s *Store) UnbindModem(ctx context.Context, modemID int64) error {
+	if modemID <= 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM modem_sim_bindings WHERE modem_id = ?`, modemID)
+	return err
+}
+
 // UpsertSim upsert SIM 行，并同步更新 modem ↔ sim 绑定。返回 sim.id。
 //
 // 当 sim.ICCID 为空但 IMSI 不为空时，使用 "imsi:<IMSI>" 作为合成标识保证可持久化
@@ -91,17 +103,24 @@ func (s *Store) UpsertSim(ctx context.Context, sim SimState, modemID int64) (int
 
 	const q = `
 INSERT INTO sims(
-    iccid, imsi, operator_id, operator_name, card_type, last_seen_at
-) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    iccid, imsi, msisdn, operator_id, operator_name, card_type, last_seen_at
+) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 ON CONFLICT(iccid) DO UPDATE SET
     imsi          = CASE WHEN excluded.imsi <> '' THEN excluded.imsi ELSE sims.imsi END,
+    msisdn        = CASE WHEN excluded.msisdn IS NOT NULL AND excluded.msisdn <> '' THEN excluded.msisdn ELSE sims.msisdn END,
     operator_id   = CASE WHEN excluded.operator_id <> '' THEN excluded.operator_id ELSE sims.operator_id END,
     operator_name = CASE WHEN excluded.operator_name <> '' THEN excluded.operator_name ELSE sims.operator_name END,
     card_type     = excluded.card_type,
     last_seen_at  = CURRENT_TIMESTAMP
 `
+	var msisdnArg any
+	if sim.MSISDN != "" {
+		msisdnArg = sim.MSISDN
+	} else {
+		msisdnArg = nil
+	}
 	if _, err := s.db.ExecContext(ctx, q,
-		iccid, sim.IMSI, sim.OperatorID, sim.OperatorName, cardType,
+		iccid, sim.IMSI, msisdnArg, sim.OperatorID, sim.OperatorName, cardType,
 	); err != nil {
 		return 0, fmt.Errorf("upsert sim: %w", err)
 	}
