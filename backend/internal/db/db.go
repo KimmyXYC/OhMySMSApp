@@ -75,22 +75,35 @@ func migrate(ctx context.Context, conn *sql.DB) error {
 		if err != nil {
 			return err
 		}
+		// 外键在事务内无法切换；某些迁移需要重建表（INSERT SELECT → DROP → RENAME），
+		// 若开着 FK 会被子表 CASCADE/SET NULL 反噬。因此每次 migration 前临时关闭 FK，
+		// 事务结束后恢复。对不涉及重建的迁移（如 0001/0002 纯 CREATE/ALTER ADD COLUMN）无副作用。
+		if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+			return fmt.Errorf("disable fk before %s: %w", name, err)
+		}
 		tx, err := conn.BeginTx(ctx, nil)
 		if err != nil {
+			_, _ = conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, string(sqlBytes)); err != nil {
 			tx.Rollback()
+			_, _ = conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
 			return fmt.Errorf("apply %s: %w", name, err)
 		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO schema_migrations(version) VALUES(?)`, version,
 		); err != nil {
 			tx.Rollback()
+			_, _ = conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
 			return err
 		}
 		if err := tx.Commit(); err != nil {
+			_, _ = conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
 			return err
+		}
+		if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
+			return fmt.Errorf("re-enable fk after %s: %w", name, err)
 		}
 	}
 	return nil

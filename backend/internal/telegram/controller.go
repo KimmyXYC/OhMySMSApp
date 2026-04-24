@@ -2,12 +2,20 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"strings"
 	"sync"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/config"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/modem"
 )
+
+// ErrBotNotConfigured 表示尚未配置 Telegram Bot（token 为空或未启动）。
+// HTTP 层用来返回 412 Precondition Failed。
+var ErrBotNotConfigured = errors.New("telegram bot not configured")
 
 // Controller 管理 Bot 的生命周期，支持配置热更新。
 // 线程安全：Start / Reload / Stop 可并发调用（内部加锁串行化）。
@@ -98,4 +106,29 @@ func (c *Controller) Running() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.current != nil
+}
+
+// TestPush 向当前绑定的 chat_id 发送一条测试消息。
+// 若 Bot 未启用（无 token 或 chat_id=0），返回 ErrBotNotConfigured。
+// 文本会被包裹为：📡 测试消息：<text>（来自 ohmysmsd）。
+// text 可为空——那样就只发前缀提示。
+func (c *Controller) TestPush(ctx context.Context, text string) error {
+	c.mu.Lock()
+	b := c.current
+	c.mu.Unlock()
+	if b == nil {
+		return ErrBotNotConfigured
+	}
+	if b.chatID == 0 {
+		return ErrBotNotConfigured
+	}
+	text = strings.TrimSpace(text)
+	body := "📡 测试消息：" + text + "（来自 ohmysmsd）"
+	// 使用纯文本（不走 MarkdownV2）避免用户输入触发 escape 失败。
+	msg := tgbotapi.NewMessage(b.chatID, body)
+	b.rateLimiter.wait(ctx, b.chatID)
+	if _, err := b.api.Send(msg); err != nil {
+		return err
+	}
+	return nil
 }

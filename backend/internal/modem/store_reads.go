@@ -32,6 +32,7 @@ type ModemRow struct {
 	MBIMPort     *string  `json:"mbim_port"`
 	USBPath      *string  `json:"usb_path"`
 	Present      bool     `json:"present"`
+	Nickname     *string  `json:"nickname"` // 用户自定义备注；NULL/空串表示未设置
 	FirstSeenAt  string   `json:"first_seen_at"`
 	LastSeenAt   string   `json:"last_seen_at"`
 
@@ -126,7 +127,7 @@ type SMSFilter struct {
 // ---------- Queries ----------
 
 const modemCols = `id, device_id, dbus_path, manufacturer, model, firmware, imei, plugin,
-primary_port, at_ports, qmi_port, mbim_port, usb_path, present, first_seen_at, last_seen_at`
+primary_port, at_ports, qmi_port, mbim_port, usb_path, present, nickname, first_seen_at, last_seen_at`
 
 const simCols = `id, iccid, imsi, msisdn, operator_id, operator_name, card_type,
 esim_card_id, esim_profile_active, esim_profile_nickname, first_seen_at, last_seen_at`
@@ -140,7 +141,7 @@ func scanModem(row interface {
 	err := row.Scan(
 		&m.ID, &m.DeviceID, &m.DBusPath, &m.Manufacturer, &m.Model, &m.Firmware,
 		&m.IMEI, &m.Plugin, &m.PrimaryPort, &atPortsJSON, &m.QMIPort, &m.MBIMPort,
-		&m.USBPath, &presentInt, &m.FirstSeenAt, &m.LastSeenAt,
+		&m.USBPath, &presentInt, &m.Nickname, &m.FirstSeenAt, &m.LastSeenAt,
 	)
 	if err != nil {
 		return m, err

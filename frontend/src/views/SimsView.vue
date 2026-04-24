@@ -49,7 +49,7 @@ function goToSms(sim: SimRow) {
   if (modem) {
     router.push({ name: 'sms', query: { device_id: modem.device_id } })
   } else {
-    router.push({ name: 'sms' })
+    router.push({ name: 'sms', query: { sim_id: String(sim.id) } })
   }
 }
 

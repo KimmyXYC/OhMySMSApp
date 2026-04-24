@@ -4,6 +4,7 @@ package httpapi
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -69,4 +70,47 @@ func registerAuthProtected(r chi.Router, deps Deps) {
 		}
 		writeJSON(w, http.StatusOK, responseUser{Username: c.Subject})
 	})
+
+	// POST /auth/password —— 修改当前用户密码。
+	// 请求体 { current_password, new_password }；new_password 至少 6 字符。
+	// 成功后返回 200 + {"message":"password updated"}；原 token 仍然有效。
+	r.Post("/auth/password", func(w http.ResponseWriter, req *http.Request) {
+		if deps.Auth == nil {
+			writeError(w, http.StatusServiceUnavailable, "auth_disabled", "auth not configured")
+			return
+		}
+		var body changePasswordRequest
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "invalid json body")
+			return
+		}
+		if strings.TrimSpace(body.NewPassword) == "" {
+			writeError(w, http.StatusBadRequest, "password_too_short", "new_password is required")
+			return
+		}
+		if len(strings.TrimSpace(body.NewPassword)) < 6 {
+			writeError(w, http.StatusBadRequest, "password_too_short", "new_password must be at least 6 characters")
+			return
+		}
+		if err := deps.Auth.ChangePassword(req.Context(), body.CurrentPassword, body.NewPassword); err != nil {
+			// 区分"当前密码错"与其它错误
+			if err.Error() == "invalid current password" {
+				writeError(w, http.StatusUnauthorized, "invalid_current_password", err.Error())
+				return
+			}
+			// 服务层也会二次校验长度，这里再兜一次
+			if strings.Contains(err.Error(), "too short") {
+				writeError(w, http.StatusBadRequest, "password_too_short", err.Error())
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "change_password_failed", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"message": "password updated"})
+	})
+}
+
+type changePasswordRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
 }

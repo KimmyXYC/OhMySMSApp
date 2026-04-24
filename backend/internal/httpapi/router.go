@@ -26,11 +26,17 @@ import (
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/modem"
 )
 
-// TelegramReloader 仅暴露 Reload 方法，避免 httpapi → telegram 反向依赖。
-// main.go 把 *telegram.Controller 作为此接口注入。
-type TelegramReloader interface {
+// TelegramController 暴露 Reload + TestPush，避免 httpapi → telegram 反向依赖。
+// main.go 把 *telegram.Controller 作为此接口注入；测试可用 mock 替代。
+type TelegramController interface {
 	Reload(ctx context.Context, cfg config.TelegramConfig) error
+	TestPush(ctx context.Context, text string) error
 }
+
+// TelegramReloader 保留作为向后兼容别名。新代码请使用 TelegramController。
+//
+// Deprecated: 使用 TelegramController。
+type TelegramReloader = TelegramController
 
 // Deps 聚合 HTTP 层依赖。
 type Deps struct {
@@ -50,8 +56,9 @@ type Deps struct {
 	Server   config.ServerConfig
 	Telegram config.TelegramConfig
 
-	// 可选：PUT /api/settings/telegram 保存后触发热重载；nil 则跳过
-	TelegramCtl TelegramReloader
+	// 可选：PUT /api/settings/telegram 保存后触发热重载；nil 则跳过。
+	// 也用于 POST /api/settings/telegram/test 发送测试消息。
+	TelegramCtl TelegramController
 }
 
 // NewRouter 组装路由。

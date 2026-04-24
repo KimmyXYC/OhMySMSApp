@@ -282,6 +282,44 @@ func (p *MMProvider) CancelUSSD(ctx context.Context, sessionID string) error {
 	return nil
 }
 
+// ResetModem 调用 org.freedesktop.ModemManager1.Modem.Reset()。
+// Reset 在 MM 内是异步的：DBus 调用会很快返回，随后 modem 对象会消失
+// （触发 InterfacesRemoved）并重新出现（触发 InterfacesAdded），provider
+// 的信号处理会自动 reconcile。
+//
+// 某些插件（例如 Huawei MBIM 的部分固件）不支持 Reset，DBus 会回
+// "org.freedesktop.ModemManager1.Error.Core.Unsupported"。此时返回
+// ErrModemResetUnsupported，方便 HTTP 层返回 501。
+func (p *MMProvider) ResetModem(ctx context.Context, deviceID string) error {
+	p.mu.RLock()
+	e, ok := p.modems[deviceID]
+	conn := p.conn
+	p.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("modem %s not found", deviceID)
+	}
+	if conn == nil {
+		return errors.New("dbus not connected")
+	}
+	modemObj := conn.Object(mmService, dbus.ObjectPath(e.State.DBusPath))
+	if err := modemObj.CallWithContext(ctx, ifaceModem+".Reset", 0).Err; err != nil {
+		// DBus error name 通常形如 ".Unsupported" 或包含 "Unsupported"。
+		// 用字符串匹配 + dbus.Error 类型双通道判定，兼容不同 MM 版本。
+		var dbusErr dbus.Error
+		if errors.As(err, &dbusErr) {
+			if strings.Contains(strings.ToLower(dbusErr.Name), "unsupported") {
+				return ErrModemResetUnsupported
+			}
+		}
+		if strings.Contains(strings.ToLower(err.Error()), "unsupported") {
+			return ErrModemResetUnsupported
+		}
+		return fmt.Errorf("modem reset: %w", err)
+	}
+	p.log.Info("modem reset requested", "device", deviceID, "path", e.State.DBusPath)
+	return nil
+}
+
 // -------------------- 内部：初始化 + 信号处理 --------------------
 
 // managedObjects 与 MM 对应的类型别名，便于阅读。

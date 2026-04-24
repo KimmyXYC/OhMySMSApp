@@ -12,3 +12,11 @@ export function logout() {
 export function checkAuth() {
   return getClient().get<{ username: string }>('/auth/me')
 }
+
+/** 修改密码 */
+export function changePassword(currentPassword: string, newPassword: string) {
+  return getClient().post('/auth/password', {
+    current_password: currentPassword,
+    new_password: newPassword,
+  })
+}

@@ -1,6 +1,8 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import type { ModemRow } from '@/types/api'
+import { modemLabel } from '@/utils/modemLabel'
 import SignalBars from './SignalBars.vue'
 import SimBadge from './SimBadge.vue'
 
@@ -9,6 +11,14 @@ const props = defineProps<{
 }>()
 
 const router = useRouter()
+
+const displayName = computed(() => modemLabel(props.modem))
+const hasNickname = computed(() => !!props.modem.nickname?.trim())
+const subtitle = computed(() => {
+  if (!hasNickname.value) return null
+  const parts = [props.modem.manufacturer, props.modem.model].filter(Boolean)
+  return parts.join(' · ') || null
+})
 
 function goDetail() {
   router.push({ name: 'modem-detail', params: { deviceId: props.modem.device_id } })
@@ -19,7 +29,10 @@ function goDetail() {
   <el-card shadow="hover" class="modem-card" @click="goDetail" style="cursor: pointer">
     <div class="modem-card__header">
       <div class="modem-card__title">
-        <span class="modem-card__name">{{ modem.manufacturer ?? '未知' }} {{ modem.model ?? '' }}</span>
+        <div class="modem-card__name-group">
+          <span class="modem-card__name">{{ displayName }}</span>
+          <span v-if="subtitle" class="modem-card__subtitle">{{ subtitle }}</span>
+        </div>
         <el-tag :type="modem.present ? 'success' : 'danger'" size="small" round>
           {{ modem.present ? '在线' : '离线' }}
         </el-tag>
@@ -72,9 +85,21 @@ function goDetail() {
     gap: 8px;
   }
 
+  &__name-group {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
   &__name {
     font-weight: 600;
     font-size: 15px;
+  }
+
+  &__subtitle {
+    font-size: 12px;
+    color: var(--el-text-color-secondary);
+    line-height: 1.3;
   }
 
   &__info {

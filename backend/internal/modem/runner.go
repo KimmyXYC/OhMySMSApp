@@ -76,6 +76,13 @@ func (r *Runner) Run(ctx context.Context) error {
 		provErr <- r.provider.Start(ctx)
 	}()
 
+	// 启动 5 秒后做一次"幽灵清扫"：把 DB 里 present=1 但这次启动后未见过的
+	// device_id 行标记为 present=0。修复历史遗留（例如上次运行时 present=1，
+	// 用户关机后换 USB 口再开机，老 device_id 的那条行从未被本次运行触及）。
+	// 迁移 0003 合并了同 IMEI 的重复行，此处处理的是 IMEI 不同 / DB 里孤立的幽灵。
+	sweepTimer := time.NewTimer(5 * time.Second)
+	defer sweepTimer.Stop()
+
 	events := r.provider.Events()
 	for {
 		select {
@@ -95,6 +102,8 @@ func (r *Runner) Run(ctx context.Context) error {
 				return err
 			}
 			return nil
+		case <-sweepTimer.C:
+			r.sweepStaleModems(ctx)
 		case ev, ok := <-events:
 			if !ok {
 				return nil
@@ -102,6 +111,33 @@ func (r *Runner) Run(ctx context.Context) error {
 			r.handle(ctx, ev)
 			r.fanout(ev)
 		}
+	}
+}
+
+// sweepStaleModems 把当前 provider.ListModems() 的所有 device_id 收集起来，
+// 交给 store.MarkStaleModemsAbsent 清理孤立幽灵。
+// provider 尚未识别出任何模块时（device_id 列表为空）直接跳过，避免误清全库。
+func (r *Runner) sweepStaleModems(ctx context.Context) {
+	snapshots := r.provider.ListModems()
+	if len(snapshots) == 0 {
+		r.log.Debug("stale sweep skipped: no modems seen yet")
+		return
+	}
+	ids := make([]string, 0, len(snapshots))
+	for _, m := range snapshots {
+		if m.DeviceID != "" {
+			ids = append(ids, m.DeviceID)
+		}
+	}
+	n, err := r.store.MarkStaleModemsAbsent(ctx, ids)
+	if err != nil {
+		r.log.Warn("stale modem sweep failed", "err", err)
+		return
+	}
+	if n > 0 {
+		r.log.Info("stale modem sweep", "seen", len(ids), "marked_absent", n)
+	} else {
+		r.log.Debug("stale modem sweep clean", "seen", len(ids))
 	}
 }
 

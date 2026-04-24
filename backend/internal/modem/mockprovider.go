@@ -256,6 +256,19 @@ func (p *MockProvider) RespondUSSD(_ context.Context, _, _ string) (string, erro
 // CancelUSSD 总是成功。
 func (p *MockProvider) CancelUSSD(_ context.Context, _ string) error { return nil }
 
+// ResetModem mock：仅记录一条日志，立即返回成功。
+// 真实实现下 Reset 会触发 modem 重新上线；mock 不做这个模拟以避免打乱测试。
+func (p *MockProvider) ResetModem(_ context.Context, deviceID string) error {
+	p.mu.RLock()
+	_, ok := p.modems[deviceID]
+	p.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("modem %s not found", deviceID)
+	}
+	p.log.Info("mock modem reset requested", "device", deviceID)
+	return nil
+}
+
 // safeEmit 非阻塞投递（channel 满时丢弃）。
 func (p *MockProvider) safeEmit(ev Event) {
 	select {

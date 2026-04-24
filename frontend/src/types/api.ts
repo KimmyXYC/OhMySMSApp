@@ -41,6 +41,7 @@ export interface ModemRow {
   model: string | null
   firmware: string | null
   imei: string | null
+  nickname?: string | null
   plugin: string | null
   primary_port: string | null
   at_ports: string[] | null

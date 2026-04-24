@@ -15,3 +15,8 @@ export function getModem(deviceId: string) {
 export function resetModem(deviceId: string) {
   return getClient().post(`/modems/${encodeURIComponent(deviceId)}/reset`)
 }
+
+/** 设置 modem 备注名 */
+export function setModemNickname(deviceId: string, nickname: string) {
+  return getClient().put<ModemRow>(`/modems/${encodeURIComponent(deviceId)}/nickname`, { nickname })
+}

@@ -1,26 +1,35 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useSmsStore } from '@/stores/sms'
 import { useModemsStore } from '@/stores/modems'
+import { useSimsStore } from '@/stores/sims'
 import { ElMessage } from 'element-plus'
 import SmsThread from '@/components/SmsThread.vue'
 import { Search, Position } from '@element-plus/icons-vue'
+import { modemLabel } from '@/utils/modemLabel'
 import type { ThreadRow } from '@/types/api'
 
 const route = useRoute()
 const router = useRouter()
 const smsStore = useSmsStore()
 const modemsStore = useModemsStore()
+const simsStore = useSimsStore()
 
-// 筛选
+// 筛选 — 空字符串 = 全部模块
 const selectedDeviceId = ref<string>('')
-const directionFilter = ref<string>('')
 const searchQuery = ref('')
 
-// 当前会话
+// 是否由路由参数初始化（防止 watch 重复拉取）
+const initializedFromRoute = ref(false)
+
+// 当前会话 — thread 的完整 key 是 (sim_id, peer)
 const activePeer = ref<string | null>(null)
+const activeSimId = ref<number | null>(null)
 const showDetail = ref(false)
+
+// 发送框的目标 modem device_id（从选中 thread 的 sim_id 自动推导，也可手动切换）
+const sendDeviceId = ref<string>('')
 
 // 发送
 const sendText = ref('')
@@ -30,6 +39,11 @@ const isMobile = ref(window.innerWidth < 768)
 window.addEventListener('resize', () => {
   isMobile.value = window.innerWidth < 768
 })
+
+/** 生成 thread 的复合唯一 key */
+function threadKey(peer: string, simId: number | null | undefined): string {
+  return `${simId ?? ''}:${peer}`
+}
 
 // 过滤后的 threads
 const filteredThreads = computed(() => {
@@ -45,27 +59,30 @@ const filteredThreads = computed(() => {
   return list
 })
 
-// modem 选项
-const modemOptions = computed(() =>
-  modemsStore.modems
+// modem 选项 — 第一项是"全部模块"
+const modemOptions = computed(() => {
+  const items = modemsStore.modems
     .filter((m) => m.present)
     .map((m) => ({
-      label: `${m.manufacturer ?? ''} ${m.model ?? ''} (${m.device_id.slice(-6)})`,
+      label: modemLabel(m),
       value: m.device_id,
-    })),
-)
+    }))
+  return items
+})
 
-// 默认选第一个 modem
-watch(
-  () => modemsStore.modems,
-  (list) => {
-    if (!selectedDeviceId.value && list.length > 0) {
-      const first = list.find((m) => m.present) || list[0]
-      selectedDeviceId.value = first.device_id
-    }
-  },
-  { immediate: true },
-)
+/** 通过 sim_id 找到绑定它的 modem 的 device_id */
+function deviceIdForSim(simId: number | null | undefined): string {
+  if (simId == null) return ''
+  const modem = modemsStore.modems.find((m) => m.sim?.id === simId)
+  return modem?.device_id ?? ''
+}
+
+/** 通过 device_id 找到 modem 绑定的 sim_id */
+function simIdForDevice(deviceId: string): number | undefined {
+  if (!deviceId) return undefined
+  const modem = modemsStore.modems.find((m) => m.device_id === deviceId)
+  return modem?.sim?.id ?? undefined
+}
 
 function formatTime(ts: string): string {
   const d = new Date(ts)
@@ -82,31 +99,41 @@ function truncate(s: string, len: number): string {
 }
 
 async function loadThreads() {
-  const params: { device_id?: string } = {}
-  if (selectedDeviceId.value) params.device_id = selectedDeviceId.value
+  // 后端 /api/sms/threads 只接受 sim_id，不接受 device_id
+  const params: { sim_id?: number } = {}
+  if (selectedDeviceId.value) {
+    const sid = simIdForDevice(selectedDeviceId.value)
+    if (sid != null) params.sim_id = sid
+  }
   await smsStore.fetchThreads(params)
 }
 
 async function selectThread(thread: ThreadRow) {
   activePeer.value = thread.peer
+  activeSimId.value = thread.sim_id ?? null
   showDetail.value = true
-  smsStore.clearUnread(thread.peer)
+  smsStore.clearUnread(threadKey(thread.peer, thread.sim_id))
+
+  // 自动填充发送框的目标 modem
+  sendDeviceId.value = deviceIdForSim(thread.sim_id)
+
+  // 使用 thread 自身的 sim_id 查询消息，完全独立于顶部过滤器
   await smsStore.fetchMessages({
     peer: thread.peer,
-    device_id: selectedDeviceId.value || undefined,
+    sim_id: thread.sim_id ?? undefined,
     limit: 200,
   })
 }
 
 async function handleSend() {
   if (!sendText.value.trim() || !activePeer.value) return
-  if (!selectedDeviceId.value) {
-    ElMessage.warning('请先选择一个模块')
+  if (!sendDeviceId.value) {
+    ElMessage.warning('请先选择一个模块才能发送')
     return
   }
   try {
     await smsStore.sendSms({
-      device_id: selectedDeviceId.value,
+      device_id: sendDeviceId.value,
       peer: activePeer.value,
       body: sendText.value.trim(),
     })
@@ -128,31 +155,64 @@ function handleDeleteMessage(id: number) {
 function goBack() {
   showDetail.value = false
   activePeer.value = null
+  activeSimId.value = null
+  sendDeviceId.value = ''
 }
 
-// 设备切换时刷新
+// 设备切换时刷新 thread 列表（跳过初始路由初始化阶段）
+// 不再重新拉取右侧消息 — 右侧会话完全由 selectThread 控制
 watch(selectedDeviceId, () => {
-  loadThreads()
-  if (activePeer.value) {
-    smsStore.fetchMessages({
-      peer: activePeer.value,
-      device_id: selectedDeviceId.value || undefined,
-    })
+  if (initializedFromRoute.value) {
+    initializedFromRoute.value = false
+    return
   }
+  loadThreads()
 })
 
 // 初始化
 onMounted(async () => {
-  await modemsStore.fetchModems()
+  await Promise.all([modemsStore.fetchModems(), simsStore.fetchSims()])
+
+  // 读取路由参数预选 modem
+  const queryDeviceId = route.query.device_id as string | undefined
+  const querySimId = route.query.sim_id as string | undefined
+
+  if (queryDeviceId) {
+    // 直接使用 device_id
+    const found = modemsStore.modems.find((m) => m.device_id === queryDeviceId)
+    if (found) {
+      initializedFromRoute.value = true
+      selectedDeviceId.value = found.device_id
+    }
+  } else if (querySimId) {
+    // 通过 sim_id 找到对应 modem
+    const simIdNum = parseInt(querySimId, 10)
+    if (!isNaN(simIdNum)) {
+      const found = modemsStore.modems.find((m) => m.sim?.id === simIdNum)
+      if (found) {
+        initializedFromRoute.value = true
+        selectedDeviceId.value = found.device_id
+      }
+    }
+  }
+  // else: selectedDeviceId 保持空 → 拉取全部
+
   await loadThreads()
 
   // 如果 URL 带了 peer query，自动打开
   const queryPeer = route.query.peer as string
   if (queryPeer) {
+    // 尝试从已加载的 threads 里找到匹配 thread 以获取 sim_id
+    const matchThread = smsStore.threads.find((t) => t.peer === queryPeer)
     activePeer.value = queryPeer
+    activeSimId.value = matchThread?.sim_id ?? null
     showDetail.value = true
-    smsStore.clearUnread(queryPeer)
-    await smsStore.fetchMessages({ peer: queryPeer, device_id: selectedDeviceId.value || undefined })
+    smsStore.clearUnread(threadKey(queryPeer, activeSimId.value))
+    sendDeviceId.value = deviceIdForSim(activeSimId.value)
+    await smsStore.fetchMessages({
+      peer: queryPeer,
+      sim_id: activeSimId.value ?? undefined,
+    })
   }
 })
 </script>
@@ -165,11 +225,15 @@ onMounted(async () => {
       <div class="sms-toolbar__filters">
         <el-select
           v-model="selectedDeviceId"
-          placeholder="选择模块"
+          placeholder="全部模块"
           clearable
           style="width: 220px"
           size="default"
         >
+          <el-option
+            label="📡 全部模块"
+            value=""
+          />
           <el-option
             v-for="opt in modemOptions"
             :key="opt.value"
@@ -202,7 +266,7 @@ onMounted(async () => {
             v-for="thread in filteredThreads"
             :key="thread.peer + '-' + (thread.sim_id ?? '')"
             class="thread-item"
-            :class="{ 'thread-item--active': activePeer === thread.peer }"
+            :class="{ 'thread-item--active': activePeer === thread.peer && activeSimId === (thread.sim_id ?? null) }"
             @click="selectThread(thread)"
           >
             <div class="thread-item__avatar">
@@ -216,8 +280,8 @@ onMounted(async () => {
               <div class="thread-item__bottom">
                 <span class="thread-item__preview">{{ truncate(thread.last_text, 40) }}</span>
                 <el-badge
-                  v-if="(smsStore.unreadMap[thread.peer] ?? 0) > 0"
-                  :value="smsStore.unreadMap[thread.peer]"
+                  v-if="(smsStore.unreadMap[threadKey(thread.peer, thread.sim_id)] ?? 0) > 0"
+                  :value="smsStore.unreadMap[threadKey(thread.peer, thread.sim_id)]"
                   :max="99"
                   class="thread-item__badge"
                 />
@@ -257,6 +321,19 @@ onMounted(async () => {
 
           <!-- 发送框 -->
           <div class="sms-detail__send">
+            <el-select
+              v-model="sendDeviceId"
+              placeholder="选择模块"
+              size="default"
+              style="width: 160px; flex-shrink: 0"
+            >
+              <el-option
+                v-for="opt in modemOptions"
+                :key="opt.value"
+                :label="opt.label"
+                :value="opt.value"
+              />
+            </el-select>
             <el-input
               v-model="sendText"
               placeholder="输入消息..."
@@ -269,7 +346,7 @@ onMounted(async () => {
               type="primary"
               :icon="Position"
               :loading="smsStore.sending"
-              :disabled="!sendText.trim()"
+              :disabled="!sendText.trim() || !sendDeviceId"
               @click="handleSend"
             >
               发送
@@ -277,7 +354,7 @@ onMounted(async () => {
           </div>
         </template>
 
-        <el-empty v-else description="选择一个会话查看消息" :image-size="100" />
+        <el-empty v-else description="选择左侧会话开始查看" :image-size="100" />
       </div>
     </div>
   </div>

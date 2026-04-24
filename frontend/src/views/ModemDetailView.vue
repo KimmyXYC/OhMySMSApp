@@ -3,9 +3,10 @@ import { ref, onMounted, computed, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useModemsStore } from '@/stores/modems'
 import { getSignalHistory } from '@/api/signal'
-import { resetModem } from '@/api/modems'
+import { resetModem, setModemNickname } from '@/api/modems'
 import SignalBars from '@/components/SignalBars.vue'
 import SimBadge from '@/components/SimBadge.vue'
+import { modemLabel } from '@/utils/modemLabel'
 import { ElMessage } from 'element-plus'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
@@ -30,7 +31,52 @@ const loading = ref(true)
 const signalHistory = ref<SignalRow[]>([])
 const chartLoading = ref(false)
 
+// Nickname editing state
+const editingNickname = ref(false)
+const nicknameInput = ref('')
+const nicknameSaving = ref(false)
+
 const deviceId = computed(() => route.params.deviceId as string)
+
+// 显示标题
+const displayTitle = computed(() => {
+  if (!modem.value) return ''
+  return modemLabel(modem.value)
+})
+
+function startEditNickname() {
+  nicknameInput.value = modem.value?.nickname ?? ''
+  editingNickname.value = true
+}
+
+function cancelEditNickname() {
+  editingNickname.value = false
+  nicknameInput.value = ''
+}
+
+async function saveNickname() {
+  if (!modem.value) return
+  nicknameSaving.value = true
+  try {
+    const { data } = await setModemNickname(deviceId.value, nicknameInput.value.trim())
+    modem.value = data
+    // 同步更新 store 中的数据
+    const idx = modemsStore.modems.findIndex((m) => m.device_id === deviceId.value)
+    if (idx >= 0) {
+      modemsStore.modems[idx] = data
+    }
+    editingNickname.value = false
+    ElMessage.success('备注已更新')
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || '更新备注失败')
+  } finally {
+    nicknameSaving.value = false
+  }
+}
+
+function goToSms() {
+  router.push({ path: '/sms', query: { device_id: deviceId.value } })
+}
 
 // 信号图表选项
 const chartOption = computed(() => {
@@ -151,14 +197,53 @@ const portList = computed(() => {
   <div class="page-container">
     <el-page-header @back="router.back()" title="返回">
       <template #content>
-        <span v-if="modem">{{ modem.manufacturer }} {{ modem.model }} — {{ modem.device_id?.slice(-8) }}</span>
+        <div v-if="modem" class="modem-title">
+          <template v-if="!editingNickname">
+            <span>{{ displayTitle }}</span>
+            <span class="modem-title__sub">{{ modem.device_id?.slice(-8) }}</span>
+            <el-button
+              text
+              size="small"
+              class="modem-title__edit-btn"
+              @click="startEditNickname"
+            >
+              ✎
+            </el-button>
+          </template>
+          <template v-else>
+            <el-input
+              v-model="nicknameInput"
+              size="small"
+              placeholder="输入备注名..."
+              style="width: 200px"
+              @keyup.enter="saveNickname"
+              @keyup.escape="cancelEditNickname"
+            />
+            <el-button
+              type="primary"
+              size="small"
+              :loading="nicknameSaving"
+              @click="saveNickname"
+            >
+              保存
+            </el-button>
+            <el-button size="small" @click="cancelEditNickname">
+              取消
+            </el-button>
+          </template>
+        </div>
       </template>
       <template #extra>
-        <el-tooltip content="功能计划中，后端尚未实现" placement="bottom">
-          <el-button type="warning" disabled @click="handleReset">
-            重置模块
+        <div class="modem-actions">
+          <el-button type="primary" plain @click="goToSms">
+            查看该模块短信
           </el-button>
-        </el-tooltip>
+          <el-tooltip content="功能计划中，后端尚未实现" placement="bottom">
+            <el-button type="warning" disabled @click="handleReset">
+              重置模块
+            </el-button>
+          </el-tooltip>
+        </div>
       </template>
     </el-page-header>
 
@@ -172,6 +257,7 @@ const portList = computed(() => {
           <el-descriptions-item label="IMEI">
             <span class="mono">{{ modem.imei ?? '—' }}</span>
           </el-descriptions-item>
+          <el-descriptions-item label="备注">{{ modem.nickname || '—' }}</el-descriptions-item>
           <el-descriptions-item label="制造商">{{ modem.manufacturer ?? '—' }}</el-descriptions-item>
           <el-descriptions-item label="型号">{{ modem.model ?? '—' }}</el-descriptions-item>
           <el-descriptions-item label="固件">{{ modem.firmware ?? '—' }}</el-descriptions-item>
@@ -244,5 +330,35 @@ const portList = computed(() => {
 .mono {
   font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
   font-size: 13px;
+}
+
+.modem-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+
+  &__sub {
+    font-size: 13px;
+    color: var(--el-text-color-secondary);
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  }
+
+  &__edit-btn {
+    font-size: 16px;
+    padding: 4px 6px;
+    color: var(--el-text-color-secondary);
+    transition: color 0.2s;
+
+    &:hover {
+      color: var(--el-color-primary);
+    }
+  }
+}
+
+.modem-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 </style>

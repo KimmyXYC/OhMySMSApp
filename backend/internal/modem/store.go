@@ -21,19 +21,47 @@ type Store struct {
 // NewStore 构造 Store。
 func NewStore(db *sql.DB) *Store { return &Store{db: db} }
 
-// UpsertModem 按 device_id upsert 一条 modem 记录，并返回其自增主键。
+// UpsertModem 按"稳定身份"upsert 一条 modem 记录，并返回其自增主键。
+//
+// 稳定身份优先级：
+//  1. 若 state.IMEI != ""：以 imei 作为冲突键。这样同一物理模块换 USB 口、
+//     或固件切换身份（例如 Huawei ME906s 从 ME906s 变成 ME909s-821）
+//     导致 MM DeviceIdentifier 变化时，新 device_id 会覆盖旧 device_id 到同一行，
+//     不再产生幽灵 present=0 行。
+//  2. 若 IMEI 为空（极罕见：模块早期未识别 IMEI）：回退到 device_id 冲突键，
+//     避免破坏原有行为；这类行通常后续读到 IMEI 后会被合并或独立存在。
 func (s *Store) UpsertModem(ctx context.Context, m ModemState) (int64, error) {
 	atPortsJSON, _ := json.Marshal(collectPortNames(m.Ports, "at"))
 	qmiPort := firstPortByType(m.Ports, "qmi")
 	mbimPort := firstPortByType(m.Ports, "mbim")
 
-	// present=1, last_seen_at=now；first_seen_at 由 INSERT 默认值提供。
-	const q = `
+	var conflictKey string
+	if m.IMEI != "" {
+		conflictKey = "imei"
+	} else {
+		conflictKey = "device_id"
+	}
+
+	// imei 字段存储规范：空串统一写 NULL。
+	// SQLite UNIQUE 视多个 NULL 为不冲突，这样：
+	//  - 同一 IMEI 的行被 idx_modems_imei_unique 合并（修复幽灵）
+	//  - IMEI 缺失的罕见场景（MBIM 早期未识别）多条能并存，不会被错误去重
+	var imeiArg any
+	if m.IMEI == "" {
+		imeiArg = nil
+	} else {
+		imeiArg = m.IMEI
+	}
+
+	// present=1, last_seen_at=now；first_seen_at 由 INSERT 默认值提供（冲突时不覆盖）。
+	// device_id 在 IMEI 冲突分支里会被更新为 excluded.device_id，把 DBus 定位信息刷新到最新 USB 口。
+	q := `
 INSERT INTO modems(
     device_id, dbus_path, manufacturer, model, firmware, imei, plugin,
     primary_port, at_ports, qmi_port, mbim_port, usb_path, present, last_seen_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
-ON CONFLICT(device_id) DO UPDATE SET
+ON CONFLICT(` + conflictKey + `) DO UPDATE SET
+    device_id    = excluded.device_id,
     dbus_path    = excluded.dbus_path,
     manufacturer = excluded.manufacturer,
     model        = excluded.model,
@@ -49,11 +77,12 @@ ON CONFLICT(device_id) DO UPDATE SET
     last_seen_at = CURRENT_TIMESTAMP
 `
 	if _, err := s.db.ExecContext(ctx, q,
-		m.DeviceID, m.DBusPath, m.Manufacturer, m.Model, m.Revision, m.IMEI, m.Plugin,
+		m.DeviceID, m.DBusPath, m.Manufacturer, m.Model, m.Revision, imeiArg, m.Plugin,
 		m.PrimaryPort, string(atPortsJSON), qmiPort, mbimPort, m.USBPath,
 	); err != nil {
 		return 0, fmt.Errorf("upsert modem: %w", err)
 	}
+	// 用 device_id 反查 id（upsert 后此刻该 device_id 已是最新的）。
 	var id int64
 	if err := s.db.QueryRowContext(ctx,
 		`SELECT id FROM modems WHERE device_id = ?`, m.DeviceID,
@@ -69,6 +98,79 @@ func (s *Store) MarkModemAbsent(ctx context.Context, deviceID string) error {
 		`UPDATE modems SET present = 0, last_seen_at = CURRENT_TIMESTAMP WHERE device_id = ?`,
 		deviceID)
 	return err
+}
+
+// MarkStaleModemsAbsent 把 DB 里 present=1 但 device_id 不在 seenDeviceIDs 中的
+// modem 行标记为 present=0，并清空其 SIM 绑定。返回受影响行数。
+//
+// 用途：服务启动时可能残留旧 device_id 的幽灵记录（比如上次运行时 present=1，
+// 用户关机换了 USB 口再开机，新 device_id 被 upsert 进来，但老 device_id 的那条
+// 仍是 present=1）。迁移 0003 会合并同 IMEI 的行，但对"IMEI 在 DB 里但这次没见到"
+// 的历史幽灵也需要一次扫除。
+//
+// 特殊情况：seenDeviceIDs 为空 → 不做任何事，避免在 provider 尚未识别到任何模块
+// 时把全库模块都清成 absent。
+func (s *Store) MarkStaleModemsAbsent(ctx context.Context, seenDeviceIDs []string) (int64, error) {
+	if len(seenDeviceIDs) == 0 {
+		return 0, nil
+	}
+
+	// 构造 IN (?,?,...) 占位符
+	placeholders := make([]string, len(seenDeviceIDs))
+	args := make([]any, len(seenDeviceIDs))
+	for i, d := range seenDeviceIDs {
+		placeholders[i] = "?"
+		args[i] = d
+	}
+	inList := strings.Join(placeholders, ",")
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// 先清这些即将被标记 absent 的行的 sim 绑定，避免前端残留
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM modem_sim_bindings WHERE modem_id IN (
+            SELECT id FROM modems WHERE present = 1 AND device_id NOT IN (`+inList+`)
+        )`, args...); err != nil {
+		return 0, fmt.Errorf("unbind stale modems: %w", err)
+	}
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE modems SET present = 0, last_seen_at = CURRENT_TIMESTAMP
+         WHERE present = 1 AND device_id NOT IN (`+inList+`)`, args...)
+	if err != nil {
+		return 0, fmt.Errorf("mark stale modems absent: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// SetModemNickname 设置 modem 的用户备注。nickname 为空串时写入 NULL（清空）。
+// 若 device_id 不存在，返回 sql.ErrNoRows。
+func (s *Store) SetModemNickname(ctx context.Context, deviceID, nickname string) error {
+	nickname = strings.TrimSpace(nickname)
+	var arg any
+	if nickname == "" {
+		arg = nil
+	} else {
+		arg = nickname
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE modems SET nickname = ? WHERE device_id = ?`, arg, deviceID)
+	if err != nil {
+		return fmt.Errorf("set modem nickname: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 // UnbindModem 删除 modem 的 modem_sim_bindings 行。

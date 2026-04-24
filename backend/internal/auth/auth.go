@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -30,14 +31,24 @@ type Claims struct {
 	ExpiresAt time.Time
 }
 
-// Service 聚合签发/校验/密码校验逻辑。无状态，线程安全。
+// Service 聚合签发/校验/密码校验逻辑。线程安全：passwordBcrypt 可被 ChangePassword 修改，读写都过 mu。
 type Service struct {
-	log            *slog.Logger
-	secret         []byte
-	username       string
+	log      *slog.Logger
+	secret   []byte
+	username string
+
+	mu             sync.RWMutex
 	passwordBcrypt string // 允许为空 → 开发模式
-	ttl            time.Duration
-	devMode        bool // passwordBcrypt 为空时为 true
+
+	ttl     time.Duration
+	devMode bool // 初始化时 passwordBcrypt 是否为空；仅用于启动告警
+	store   PasswordStore
+}
+
+// PasswordStore 抽象密码持久化。ChangePassword 会在 hash 出来后调用 Save，
+// 以便跨重启保留。允许为 nil（仅内存模式，用于单元测试或 hash-password 子命令）。
+type PasswordStore interface {
+	SavePasswordBcrypt(ctx context.Context, hash string) error
 }
 
 // Config 服务构造参数。
@@ -46,6 +57,8 @@ type Config struct {
 	Username       string
 	PasswordBcrypt string
 	TokenTTL       time.Duration
+	// 可选：ChangePassword 落盘。nil 则 ChangePassword 仅更新内存。
+	Store PasswordStore
 }
 
 // New 构造 Service。secret 若为 nil/空，会返回错误（调用方须先生成）。
@@ -73,6 +86,7 @@ func New(cfg Config, log *slog.Logger) (*Service, error) {
 		passwordBcrypt: cfg.PasswordBcrypt,
 		ttl:            cfg.TokenTTL,
 		devMode:        dev,
+		store:          cfg.Store,
 	}, nil
 }
 
@@ -83,15 +97,60 @@ func (s *Service) Username() string { return s.username }
 func (s *Service) TTL() time.Duration { return s.ttl }
 
 // CheckCredentials 验证用户名 + 明文密码。devMode 下任意密码通过，但用户名仍需匹配。
+//
+// "dev 模式"特指当前 passwordBcrypt 为空——ChangePassword 成功后会写入 hash
+// 并自动退出 dev 模式。
 func (s *Service) CheckCredentials(username, password string) error {
 	if username != s.username {
 		return errors.New("invalid credentials")
 	}
-	if s.devMode {
+	s.mu.RLock()
+	hash := s.passwordBcrypt
+	s.mu.RUnlock()
+	if hash == "" {
 		s.log.Warn("dev-mode login accepted", "user", username)
 		return nil
 	}
-	return comparePassword(s.passwordBcrypt, password)
+	return comparePassword(hash, password)
+}
+
+// ChangePassword 校验 currentPassword 后把 newPassword 写入 bcrypt hash 并持久化。
+// 规则：
+//   - currentPassword 按现行 passwordBcrypt 校验；若当前 dev 模式（无 hash），
+//     任何 currentPassword 都通过（让首次设密码成为可能）。
+//   - newPassword 必须 >= 6 字符，不可为空白。
+//   - 持久化走 PasswordStore；store 为 nil 时只更新内存（会在重启后丢失，测试场景）。
+//   - 内存的 passwordBcrypt 用写锁替换，新登录立即生效。
+//   - 已签发的 JWT 不会失效（按 spec）。
+func (s *Service) ChangePassword(ctx context.Context, currentPassword, newPassword string) error {
+	if len(strings.TrimSpace(newPassword)) < 6 {
+		return errors.New("new password too short (min 6 chars)")
+	}
+	s.mu.RLock()
+	hash := s.passwordBcrypt
+	s.mu.RUnlock()
+	if hash != "" {
+		if err := comparePassword(hash, currentPassword); err != nil {
+			return errors.New("invalid current password")
+		}
+	} else {
+		s.log.Warn("change-password in dev mode: accepting any current password",
+			"user", s.username)
+	}
+	newHash, err := HashPassword(newPassword)
+	if err != nil {
+		return fmt.Errorf("hash new password: %w", err)
+	}
+	if s.store != nil {
+		if err := s.store.SavePasswordBcrypt(ctx, newHash); err != nil {
+			return fmt.Errorf("persist password: %w", err)
+		}
+	}
+	s.mu.Lock()
+	s.passwordBcrypt = newHash
+	s.mu.Unlock()
+	s.log.Info("password changed", "user", s.username)
+	return nil
 }
 
 // Issue 签发 JWT。

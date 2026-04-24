@@ -3,6 +3,7 @@ import { ref, computed, onMounted, nextTick } from 'vue'
 import { useModemsStore } from '@/stores/modems'
 import { initiateUssd, respondUssd, cancelUssd, listUssdSessions } from '@/api/ussd'
 import { ElMessage } from 'element-plus'
+import { modemLabel } from '@/utils/modemLabel'
 import type { UssdResponse, USSDRow, UssdTurn } from '@/types/api'
 
 const modemsStore = useModemsStore()
@@ -32,7 +33,7 @@ const modemOptions = computed(() =>
   modemsStore.modems
     .filter((m) => m.present)
     .map((m) => ({
-      label: `${m.manufacturer ?? ''} ${m.model ?? ''} (${m.device_id.slice(-6)})`,
+      label: modemLabel(m),
       value: m.device_id,
     })),
 )

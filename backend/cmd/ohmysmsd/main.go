@@ -100,16 +100,18 @@ func run() error {
 			"tokens will invalidate on restart. set auth.jwt_secret in config.yaml for persistence",
 			"hint_secret", gen[:8]+"...")
 	}
+	pwStore := &authPasswordStore{store: modem.NewStore(conn)}
+	passwordHash := loadPasswordBcrypt(rootCtx, cfg.Auth.PasswordBcrypt, pwStore.store)
 	authSvc, err := auth.New(auth.Config{
 		Secret:         []byte(jwtSecret),
 		Username:       cfg.Auth.Username,
-		PasswordBcrypt: cfg.Auth.PasswordBcrypt,
+		PasswordBcrypt: passwordHash,
 		TokenTTL:       cfg.Auth.TokenTTL,
+		Store:          pwStore,
 	}, log)
 	if err != nil {
 		return fmt.Errorf("init auth: %w", err)
 	}
-
 	// Provider
 	var provider modem.Provider
 	if cfg.Modem.Enabled {
@@ -119,7 +121,7 @@ func run() error {
 		provider = modem.NewMockProvider(log)
 		log.Info("modem provider: mock")
 	}
-	modemStore := modem.NewStore(conn)
+	modemStore := pwStore.store
 	runner := modem.NewRunner(provider, modemStore, log)
 
 	runnerErrCh := make(chan error, 1)
@@ -195,4 +197,29 @@ func loadTelegramConfig(ctx context.Context, fileCfg config.TelegramConfig, stor
 		return fileCfg
 	}
 	return saved
+}
+
+// authSettingsKey 是存放 bcrypt 密码 hash 的 settings 表键。
+// 注意：loadPasswordBcrypt 与 authPasswordStore.SavePasswordBcrypt 必须
+// 使用相同的 key，否则重启后配置会漂移。
+const authSettingsKey = "auth.password_bcrypt"
+
+// authPasswordStore 实现 auth.PasswordStore，把 bcrypt hash 持久化到 settings 表。
+type authPasswordStore struct {
+	store *modem.Store
+}
+
+func (p *authPasswordStore) SavePasswordBcrypt(ctx context.Context, hash string) error {
+	return p.store.PutSetting(ctx, authSettingsKey, hash)
+}
+
+// loadPasswordBcrypt 合并 config.yaml 与 settings 表的密码 hash。
+// 策略：settings 表中有值时整体覆盖 config.yaml（与 telegram 配置行为一致）。
+// 这样用户通过 Web 改密后，重启仍然生效。
+func loadPasswordBcrypt(ctx context.Context, fileHash string, store *modem.Store) string {
+	raw, err := store.GetSetting(ctx, authSettingsKey)
+	if err == nil && raw != "" {
+		return raw
+	}
+	return fileHash
 }

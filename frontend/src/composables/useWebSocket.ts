@@ -129,24 +129,31 @@ export function useWebSocket() {
         const peer = smsData.sms?.peer || ''
         const text = smsData.sms?.text || smsData.sms?.body || ''
 
-        // 全局通知
+        // 通过 device_id 查找对应 modem 的 sim_id
+        const wsModem = modemsStore.modems.find((m) => m.device_id === smsData.device_id)
+        const wsSimId = wsModem?.sim?.id ?? null
+
+        // 全局通知：5 秒自动关闭，可手动点 × 关闭。
         ElNotification({
           title: `新短信 ${peer}`,
-          message: text.length > 80 ? text.slice(0, 80) + '...' : text,
+          message: text.length > 140 ? text.slice(0, 140) + '…' : text,
           type: 'info',
           duration: 5000,
+          showClose: true,
           onClick: () => {
             router.push({ name: 'sms', query: { peer } })
           },
         })
 
-        // 如果当前正在看这个 peer 的会话，刷新
+        // 如果当前正在看这个 (sim_id, peer) 的会话，刷新
         const currentPeer = smsStore.currentMessages[0]?.peer
-        if (currentPeer === peer) {
-          smsStore.refreshCurrentThread(peer)
+        const currentSimId = smsStore.currentSimId
+        if (currentPeer === peer && currentSimId === wsSimId) {
+          smsStore.refreshCurrentThread(peer, wsSimId ?? undefined)
         } else {
-          // 标记未读
-          smsStore.markUnread(peer)
+          // 标记未读（复合 key）
+          const key = `${wsSimId ?? ''}:${peer}`
+          smsStore.markUnread(key)
         }
 
         // 刷新 threads 列表
@@ -158,7 +165,8 @@ export function useWebSocket() {
         // 刷新当前消息
         if (smsStore.currentMessages.length > 0) {
           const peer = smsStore.currentMessages[0].peer
-          smsStore.refreshCurrentThread(peer)
+          const simId = smsStore.currentSimId
+          smsStore.refreshCurrentThread(peer, simId ?? undefined)
         }
         break
       }

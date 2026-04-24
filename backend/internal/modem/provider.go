@@ -1,6 +1,14 @@
 package modem
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrModemResetUnsupported 表示该 modem 的插件不支持 Reset 操作
+// （典型例子：Huawei MBIM 等固件 DBus 会返回 "Unsupported"）。
+// HTTP 层以此判定返回 501 Not Implemented。
+var ErrModemResetUnsupported = errors.New("modem reset not supported by this modem")
 
 // Provider 抽象 ModemManager 的能力，允许在开发/测试环境替换为 Mock。
 type Provider interface {
@@ -35,4 +43,9 @@ type Provider interface {
 
 	// CancelUSSD 终止 USSD 会话。
 	CancelUSSD(ctx context.Context, sessionID string) error
+
+	// ResetModem 调用 MM Modem.Reset() 让 modem 软复位。
+	// MM Reset 是异步的：调用会立即返回，随后 modem 在 DBus 上会消失并重新出现。
+	// 若底层插件不支持（例如部分 Huawei MBIM 固件），返回 ErrModemResetUnsupported。
+	ResetModem(ctx context.Context, deviceID string) error
 }

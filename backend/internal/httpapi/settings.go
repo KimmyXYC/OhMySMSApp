@@ -10,11 +10,13 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/config"
+	"github.com/KimmyXYC/ohmysmsapp/backend/internal/telegram"
 )
 
 type telegramDTO struct {
@@ -87,6 +89,38 @@ func registerSettings(r chi.Router, deps Deps) {
 			Source:   "settings",
 		})
 	})
+
+	// POST /settings/telegram/test —— 发送一条测试消息到已绑定 chat_id。
+	// Body: {"text":"可选"}；空文本也可用，仅发默认 "测试消息" 提示。
+	// 412：bot 未配置；500：Telegram API 返回错误；200：成功。
+	r.Post("/settings/telegram/test", func(w http.ResponseWriter, req *http.Request) {
+		var body telegramTestRequest
+		if req.ContentLength > 0 {
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				writeError(w, http.StatusBadRequest, "bad_request", "invalid json body")
+				return
+			}
+		}
+		if deps.TelegramCtl == nil {
+			writeError(w, http.StatusPreconditionFailed, "not_configured",
+				"telegram not configured")
+			return
+		}
+		if err := deps.TelegramCtl.TestPush(req.Context(), body.Text); err != nil {
+			if errors.Is(err, telegram.ErrBotNotConfigured) {
+				writeError(w, http.StatusPreconditionFailed, "not_configured",
+					"telegram not configured")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "send_failed", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"message": "sent"})
+	})
+}
+
+type telegramTestRequest struct {
+	Text string `json:"text"`
 }
 
 // loadTelegram 从 settings 表加载；缺省回退到 config.yaml 里的值。
