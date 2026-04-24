@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/KimmyXYC/ohmysmsapp/backend/internal/audit"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/auth"
 )
 
@@ -39,14 +40,36 @@ func registerAuthPublic(r chi.Router, deps Deps) {
 			return
 		}
 		if err := deps.Auth.CheckCredentials(body.Username, body.Password); err != nil {
+			logAudit(req.Context(), deps, audit.Entry{
+				Actor:   "web:" + body.Username,
+				Action:  "auth.login",
+				Target:  body.Username,
+				Payload: map[string]any{"ip": req.RemoteAddr},
+				Result:  "error",
+				Err:     err.Error(),
+			})
 			writeError(w, http.StatusUnauthorized, "invalid_credentials", err.Error())
 			return
 		}
 		tok, exp, err := deps.Auth.Issue(body.Username)
 		if err != nil {
+			logAudit(req.Context(), deps, audit.Entry{
+				Actor:  "web:" + body.Username,
+				Action: "auth.login",
+				Target: body.Username,
+				Result: "error",
+				Err:    err.Error(),
+			})
 			writeError(w, http.StatusInternalServerError, "token_issue_failed", err.Error())
 			return
 		}
+		logAudit(req.Context(), deps, audit.Entry{
+			Actor:   "web:" + body.Username,
+			Action:  "auth.login",
+			Target:  body.Username,
+			Payload: map[string]any{"ip": req.RemoteAddr},
+			Result:  "ok",
+		})
 		writeJSON(w, http.StatusOK, loginResponse{
 			Token:     tok,
 			ExpiresAt: exp.UTC().Format("2006-01-02T15:04:05Z"),
@@ -95,6 +118,12 @@ func registerAuthProtected(r chi.Router, deps Deps) {
 		if err := deps.Auth.ChangePassword(req.Context(), body.CurrentPassword, body.NewPassword); err != nil {
 			// 区分"当前密码错"与其它错误
 			if err.Error() == "invalid current password" {
+				logAudit(req.Context(), deps, audit.Entry{
+					Actor:  actorFromRequest(req),
+					Action: "auth.password",
+					Result: "error",
+					Err:    err.Error(),
+				})
 				writeError(w, http.StatusUnauthorized, "invalid_current_password", err.Error())
 				return
 			}
@@ -106,6 +135,11 @@ func registerAuthProtected(r chi.Router, deps Deps) {
 			writeError(w, http.StatusInternalServerError, "change_password_failed", err.Error())
 			return
 		}
+		logAudit(req.Context(), deps, audit.Entry{
+			Actor:  actorFromRequest(req),
+			Action: "auth.password",
+			Result: "ok",
+		})
 		writeJSON(w, http.StatusOK, map[string]string{"message": "password updated"})
 	})
 }

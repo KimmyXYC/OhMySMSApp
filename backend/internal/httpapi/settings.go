@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/KimmyXYC/ohmysmsapp/backend/internal/audit"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/config"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/telegram"
 )
@@ -71,9 +72,27 @@ func registerSettings(r chi.Router, deps Deps) {
 			return
 		}
 		if err := deps.Store.PutSetting(req.Context(), telegramSettingsKey, string(raw)); err != nil {
+			logAudit(req.Context(), deps, audit.Entry{
+				Actor:  actorFromRequest(req),
+				Action: "settings.telegram.update",
+				Result: "error",
+				Err:    err.Error(),
+			})
 			writeError(w, http.StatusInternalServerError, "db_error", err.Error())
 			return
 		}
+		// 审计 payload 不含 bot_token；只记元数据变化。
+		logAudit(req.Context(), deps, audit.Entry{
+			Actor:  actorFromRequest(req),
+			Action: "settings.telegram.update",
+			Payload: map[string]any{
+				"has_token": cur.BotToken != "",
+				"chat_id":   cur.ChatID,
+				"push_sms":  cur.PushSMS,
+				"cleared":   body.Clear,
+			},
+			Result: "ok",
+		})
 		// 热重载：token/chat_id/push_sms 任一变更都重启 bot。
 		if deps.TelegramCtl != nil {
 			if err := deps.TelegramCtl.Reload(req.Context(), cur); err != nil {
@@ -108,13 +127,31 @@ func registerSettings(r chi.Router, deps Deps) {
 		}
 		if err := deps.TelegramCtl.TestPush(req.Context(), body.Text); err != nil {
 			if errors.Is(err, telegram.ErrBotNotConfigured) {
+				logAudit(req.Context(), deps, audit.Entry{
+					Actor:  actorFromRequest(req),
+					Action: "settings.telegram.test",
+					Result: "error",
+					Err:    "not_configured",
+				})
 				writeError(w, http.StatusPreconditionFailed, "not_configured",
 					"telegram not configured")
 				return
 			}
+			logAudit(req.Context(), deps, audit.Entry{
+				Actor:  actorFromRequest(req),
+				Action: "settings.telegram.test",
+				Result: "error",
+				Err:    err.Error(),
+			})
 			writeError(w, http.StatusInternalServerError, "send_failed", err.Error())
 			return
 		}
+		logAudit(req.Context(), deps, audit.Entry{
+			Actor:   actorFromRequest(req),
+			Action:  "settings.telegram.test",
+			Payload: map[string]any{"text_len": len(body.Text)},
+			Result:  "ok",
+		})
 		writeJSON(w, http.StatusOK, map[string]string{"message": "sent"})
 	})
 }

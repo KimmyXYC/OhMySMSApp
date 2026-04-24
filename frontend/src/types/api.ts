@@ -231,6 +231,7 @@ export interface SignalRow {
   rssi_dbm: number | null
   rsrp_dbm: number | null
   rsrq_db: number | null
+  snr_db: number | null
   access_tech: string | null
   registration: string | null
   operator_id: string | null

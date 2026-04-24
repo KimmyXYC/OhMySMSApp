@@ -9,9 +9,11 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/KimmyXYC/ohmysmsapp/backend/internal/audit"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/modem"
 )
 
@@ -20,9 +22,6 @@ type smsSendRequest struct {
 	ModemID  int64  `json:"modem_id"`  // 次选；用 DB id 映射到 device_id
 	Peer     string `json:"peer"`
 	Body     string `json:"body"`
-	// 前端旧字段兼容
-	To   string `json:"to"`
-	Text string `json:"text"`
 }
 
 func registerSMS(r chi.Router, deps Deps) {
@@ -84,8 +83,8 @@ func registerSMS(r chi.Router, deps Deps) {
 			writeError(w, http.StatusBadRequest, "bad_request", "invalid json body")
 			return
 		}
-		peer := firstNonEmpty(body.Peer, body.To)
-		text := firstNonEmpty(body.Body, body.Text)
+		peer := body.Peer
+		text := body.Body
 		if peer == "" || text == "" {
 			writeError(w, http.StatusBadRequest, "bad_request", "peer and body are required")
 			return
@@ -112,9 +111,31 @@ func registerSMS(r chi.Router, deps Deps) {
 
 		extID, err := deps.Modem.SendSMS(req.Context(), deviceID, peer, text)
 		if err != nil {
+			logAudit(req.Context(), deps, audit.Entry{
+				Actor:  actorFromRequest(req),
+				Action: "sms.send",
+				Target: deviceID,
+				Payload: map[string]any{
+					"peer":     peer,
+					"body_len": utf8.RuneCountInString(text),
+				},
+				Result: "error",
+				Err:    err.Error(),
+			})
 			writeError(w, http.StatusInternalServerError, "send_failed", err.Error())
 			return
 		}
+		logAudit(req.Context(), deps, audit.Entry{
+			Actor:  actorFromRequest(req),
+			Action: "sms.send",
+			Target: deviceID,
+			Payload: map[string]any{
+				"peer":     peer,
+				"body_len": utf8.RuneCountInString(text),
+				"ext_id":   extID,
+			},
+			Result: "ok",
+		})
 
 		// 构造返回：最佳 effort 查询刚刚被 Runner 写入的行（可能还没入库）。
 		// 先尝试根据 ext_id 查一下；拿不到就返回一个最小 shape。
@@ -162,6 +183,16 @@ func registerSMS(r chi.Router, deps Deps) {
 			writeError(w, http.StatusInternalServerError, "db_error", err.Error())
 			return
 		}
+		logAudit(req.Context(), deps, audit.Entry{
+			Actor:  actorFromRequest(req),
+			Action: "sms.delete",
+			Target: strconv.FormatInt(id, 10),
+			Payload: map[string]any{
+				"peer":      rec.Peer,
+				"direction": rec.Direction,
+			},
+			Result: "ok",
+		})
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 	})
 }
@@ -178,11 +209,4 @@ func findSMSByExtID(ctx context.Context, deps Deps, extID string) *modem.SMSRow 
 		}
 	}
 	return nil
-}
-
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }

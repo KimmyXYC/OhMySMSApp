@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/KimmyXYC/ohmysmsapp/backend/internal/audit"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/modem"
 )
 
@@ -53,13 +54,33 @@ func registerModems(r chi.Router, deps Deps) {
 		}
 		if err := deps.Modem.ResetModem(req.Context(), dev); err != nil {
 			if errors.Is(err, modem.ErrModemResetUnsupported) {
+				logAudit(req.Context(), deps, audit.Entry{
+					Actor:  actorFromRequest(req),
+					Action: "modem.reset",
+					Target: dev,
+					Result: "error",
+					Err:    "unsupported",
+				})
 				writeError(w, http.StatusNotImplemented, "reset_unsupported",
 					"modem reset not supported")
 				return
 			}
+			logAudit(req.Context(), deps, audit.Entry{
+				Actor:  actorFromRequest(req),
+				Action: "modem.reset",
+				Target: dev,
+				Result: "error",
+				Err:    err.Error(),
+			})
 			writeError(w, http.StatusInternalServerError, "reset_failed", err.Error())
 			return
 		}
+		logAudit(req.Context(), deps, audit.Entry{
+			Actor:  actorFromRequest(req),
+			Action: "modem.reset",
+			Target: dev,
+			Result: "ok",
+		})
 		writeJSON(w, http.StatusAccepted, map[string]string{"message": "reset requested"})
 	})
 
@@ -89,6 +110,13 @@ func registerModems(r chi.Router, deps Deps) {
 			writeError(w, http.StatusInternalServerError, "db_error", err.Error())
 			return
 		}
+		logAudit(req.Context(), deps, audit.Entry{
+			Actor:   actorFromRequest(req),
+			Action:  "modem.nickname",
+			Target:  dev,
+			Payload: map[string]any{"nickname": nickname},
+			Result:  "ok",
+		})
 		writeJSON(w, http.StatusOK, updated)
 	})
 }

@@ -217,3 +217,94 @@ func TestMarkStaleModemsAbsent(t *testing.T) {
 		t.Errorf("stale modem binding not cleaned: %d rows", bindings)
 	}
 }
+
+// TestUpsertSim_EmptyICCIDSkipped 验证无 ICCID 时不再合成 "imsi:<IMSI>"；
+// 直接返回 (0, nil)，不向 sims 表写任何行。
+func TestUpsertSim_EmptyICCIDSkipped(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	modemID, _ := s.UpsertModem(ctx, ModemState{DeviceID: "d1", IMEI: "111222333444555"})
+	simID, err := s.UpsertSim(ctx, SimState{IMSI: "460010000000009", OperatorName: "CMCC"}, modemID)
+	if err != nil {
+		t.Fatalf("upsert sim: %v", err)
+	}
+	if simID != 0 {
+		t.Errorf("expected simID=0 for empty ICCID, got %d", simID)
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sims`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 sim rows, got %d", n)
+	}
+}
+
+// TestInsertSMS_SourceKeyDedup 验证 source_key 去重：
+// 同 (deviceID, ext_id) 多次插入只产生一行，state 会更新到最新。
+func TestInsertSMS_SourceKeyDedup(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	modemID, _ := s.UpsertModem(ctx, ModemState{DeviceID: "devA", IMEI: "900000000000001"})
+	simID, _ := s.UpsertSim(ctx, SimState{ICCID: "8986900000000000001"}, modemID)
+
+	rec := SMSRecord{
+		ExtID:     "/org/freedesktop/ModemManager1/SMS/7",
+		Direction: "inbound",
+		State:     "receiving",
+		Peer:      "+1",
+		Text:      "",
+	}
+	if err := s.InsertSMS(ctx, rec, "devA", modemID, simID); err != nil {
+		t.Fatal(err)
+	}
+	// 再来一次，state=received + body 填上
+	rec.State = "received"
+	rec.Text = "hi"
+	if err := s.InsertSMS(ctx, rec, "devA", modemID, simID); err != nil {
+		t.Fatal(err)
+	}
+
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sms`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("expected dedup to 1 row, got %d", count)
+	}
+	var state, body string
+	if err := s.db.QueryRowContext(ctx, `SELECT state, body FROM sms`).Scan(&state, &body); err != nil {
+		t.Fatal(err)
+	}
+	if state != "received" || body != "hi" {
+		t.Errorf("expected state=received body=hi, got state=%q body=%q", state, body)
+	}
+}
+
+// TestUpdateSMSState_BySourceKey 验证新的 UpdateSMSState 签名按 (deviceID, extID) 定位。
+func TestUpdateSMSState_BySourceKey(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	modemID, _ := s.UpsertModem(ctx, ModemState{DeviceID: "devX", IMEI: "900000000000002"})
+	simID, _ := s.UpsertSim(ctx, SimState{ICCID: "8986900000000000002"}, modemID)
+	rec := SMSRecord{
+		ExtID: "/mm/sms/9", Direction: "outbound", State: "sending",
+		Peer: "+2", Text: "ok",
+	}
+	if err := s.InsertSMS(ctx, rec, "devX", modemID, simID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateSMSState(ctx, "devX", "/mm/sms/9", "sent", ""); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := s.db.QueryRowContext(ctx, `SELECT state FROM sms`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "sent" {
+		t.Errorf("expected state=sent, got %q", got)
+	}
+}

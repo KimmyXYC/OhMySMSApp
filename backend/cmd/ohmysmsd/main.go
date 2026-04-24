@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/KimmyXYC/ohmysmsapp/backend/internal/audit"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/auth"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/config"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/db"
@@ -124,6 +125,9 @@ func run() error {
 	modemStore := pwStore.store
 	runner := modem.NewRunner(provider, modemStore, log)
 
+	// 审计日志服务
+	auditSvc := audit.New(conn, log)
+
 	runnerErrCh := make(chan error, 1)
 	go func() {
 		if err := runner.Run(rootCtx); err != nil {
@@ -137,7 +141,7 @@ func run() error {
 
 	// Telegram Bot
 	tgCfg := loadTelegramConfig(rootCtx, cfg.Telegram, modemStore)
-	tgCtl := telegram.NewController(provider, runner, modemStore, log)
+	tgCtl := telegram.NewController(provider, runner, modemStore, auditSvc, log)
 	if err := tgCtl.Start(rootCtx, tgCfg); err != nil {
 		log.Warn("telegram start failed", "err", err)
 	}
@@ -150,6 +154,7 @@ func run() error {
 		ModemRunner: runner,
 		Store:       modemStore,
 		Auth:        authSvc,
+		Audit:       auditSvc,
 		WSHandler:   hub,
 		Server:      cfg.Server,
 		Telegram:    cfg.Telegram,

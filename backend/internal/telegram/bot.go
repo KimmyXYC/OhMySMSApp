@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"github.com/KimmyXYC/ohmysmsapp/backend/internal/audit"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/modem"
 )
 
@@ -23,14 +25,15 @@ type botAPI interface {
 
 // bot 是运行时单例。每次 Reload 会销毁旧实例、创建新实例。
 type bot struct {
-	api        botAPI
-	chatID     int64
-	pushSMS    bool
-	provider   modem.Provider
-	runner     *modem.Runner
-	store      *modem.Store
-	log        *slog.Logger
-	sessions   *sessionStore
+	api         botAPI
+	chatID      int64
+	pushSMS     bool
+	provider    modem.Provider
+	runner      *modem.Runner
+	store       *modem.Store
+	audit       *audit.Service
+	log         *slog.Logger
+	sessions    *sessionStore
 	rateLimiter *rateLimiter
 
 	// 运行时
@@ -43,7 +46,7 @@ type bot struct {
 func newBot(parent context.Context,
 	token string, chatID int64, pushSMS bool,
 	provider modem.Provider, runner *modem.Runner, store *modem.Store,
-	log *slog.Logger,
+	auditSvc *audit.Service, log *slog.Logger,
 ) (*bot, error) {
 	if token == "" {
 		return nil, fmt.Errorf("empty token")
@@ -52,14 +55,14 @@ func newBot(parent context.Context,
 	if err != nil {
 		return nil, fmt.Errorf("connect telegram: %w", err)
 	}
-	return newBotWithAPI(parent, api, chatID, pushSMS, provider, runner, store, log), nil
+	return newBotWithAPI(parent, api, chatID, pushSMS, provider, runner, store, auditSvc, log), nil
 }
 
 // newBotWithAPI 允许测试注入 fake api。
 func newBotWithAPI(parent context.Context,
 	api botAPI, chatID int64, pushSMS bool,
 	provider modem.Provider, runner *modem.Runner, store *modem.Store,
-	log *slog.Logger,
+	auditSvc *audit.Service, log *slog.Logger,
 ) *bot {
 	ctx, cancel := context.WithCancel(parent)
 	return &bot{
@@ -69,12 +72,29 @@ func newBotWithAPI(parent context.Context,
 		provider:    provider,
 		runner:      runner,
 		store:       store,
+		audit:       auditSvc,
 		log:         log,
 		sessions:    newSessionStore(5 * time.Minute),
 		rateLimiter: newRateLimiter(100 * time.Millisecond),
 		ctx:         ctx,
 		cancel:      cancel,
 	}
+}
+
+// auditActor 返回 "telegram:<chatID>" 形式的 actor 字符串。
+func (b *bot) auditActor() string {
+	return "telegram:" + strconv.FormatInt(b.chatID, 10)
+}
+
+// logAudit 写一条 telegram 侧的审计日志。audit 为 nil 时静默。
+func (b *bot) logAudit(e audit.Entry) {
+	if b.audit == nil {
+		return
+	}
+	if e.Actor == "" {
+		e.Actor = b.auditActor()
+	}
+	b.audit.Log(b.bgCtx(), e)
 }
 
 // run 启动命令循环与推送订阅，阻塞直到 ctx 取消或致命错误。

@@ -16,8 +16,9 @@ const smsStore = useSmsStore()
 const modemsStore = useModemsStore()
 const simsStore = useSimsStore()
 
-// 筛选 — 空字符串 = 全部模块
-const selectedDeviceId = ref<string>('')
+// 筛选 — '__all__' = 全部模块（非空值以避免 Element Plus 把它渲染为 placeholder 灰色）
+const ALL_DEVICES = '__all__'
+const selectedDeviceId = ref<string>(ALL_DEVICES)
 const searchQuery = ref('')
 
 // 是否由路由参数初始化（防止 watch 重复拉取）
@@ -101,7 +102,7 @@ function truncate(s: string, len: number): string {
 async function loadThreads() {
   // 后端 /api/sms/threads 只接受 sim_id，不接受 device_id
   const params: { sim_id?: number } = {}
-  if (selectedDeviceId.value) {
+  if (selectedDeviceId.value && selectedDeviceId.value !== ALL_DEVICES) {
     const sid = simIdForDevice(selectedDeviceId.value)
     if (sid != null) params.sim_id = sid
   }
@@ -195,7 +196,7 @@ onMounted(async () => {
       }
     }
   }
-  // else: selectedDeviceId 保持空 → 拉取全部
+  // else: selectedDeviceId 保持 ALL_DEVICES → 拉取全部
 
   await loadThreads()
 
@@ -225,14 +226,12 @@ onMounted(async () => {
       <div class="sms-toolbar__filters">
         <el-select
           v-model="selectedDeviceId"
-          placeholder="全部模块"
-          clearable
           style="width: 220px"
           size="default"
         >
           <el-option
             label="📡 全部模块"
-            value=""
+            :value="ALL_DEVICES"
           />
           <el-option
             v-for="opt in modemOptions"

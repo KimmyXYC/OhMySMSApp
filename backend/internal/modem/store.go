@@ -14,12 +14,30 @@ import (
 //
 // 设计：所有操作都接受 ctx；内部用 SQLite upsert 以避免并发竞态。
 // 返回的 int64 是对应行的主键 id，便于后续关联写入（例如 sms.modem_id）。
+//
+// 时间戳约定：所有写入的时间列都由应用层产生 RFC3339 UTC 字符串，
+// schema 层已去掉 CURRENT_TIMESTAMP 默认值——这样前端/其它语言解析更省心。
 type Store struct {
 	db *sql.DB
 }
 
 // NewStore 构造 Store。
 func NewStore(db *sql.DB) *Store { return &Store{db: db} }
+
+// nowRFC3339 返回当前 UTC 时间的 RFC3339 字符串。
+// 统一使用此 helper，避免每处都写 time.Now().UTC().Format(...)。
+func nowRFC3339() string {
+	return time.Now().UTC().Format(time.RFC3339)
+}
+
+// sourceKeyForSMS 构造 sms.source_key 的统一格式。
+// deviceID 比 modem 主键更稳定（modem id 是本地自增，跨重装 DB 后会变；
+// deviceID 是 MM 分配的 hash，即使换 USB 口也能配合 IMEI 合并）。
+// ext_id 通常是 MM SMS DBus path；MM 重启后 path 会重分配，这意味着
+// 跨 MM 重启同一条短信会产生不同 source_key → 重复插入一次。可接受。
+func sourceKeyForSMS(deviceID, extID string) string {
+	return fmt.Sprintf("mm:%s:%s", deviceID, extID)
+}
 
 // UpsertModem 按"稳定身份"upsert 一条 modem 记录，并返回其自增主键。
 //
@@ -45,7 +63,7 @@ func (s *Store) UpsertModem(ctx context.Context, m ModemState) (int64, error) {
 	// imei 字段存储规范：空串统一写 NULL。
 	// SQLite UNIQUE 视多个 NULL 为不冲突，这样：
 	//  - 同一 IMEI 的行被 idx_modems_imei_unique 合并（修复幽灵）
-	//  - IMEI 缺失的罕见场景（MBIM 早期未识别）多条能并存，不会被错误去重
+	//  - IMEI 缺失的罕见场景多条能并存，不会被错误去重
 	var imeiArg any
 	if m.IMEI == "" {
 		imeiArg = nil
@@ -53,13 +71,14 @@ func (s *Store) UpsertModem(ctx context.Context, m ModemState) (int64, error) {
 		imeiArg = m.IMEI
 	}
 
-	// present=1, last_seen_at=now；first_seen_at 由 INSERT 默认值提供（冲突时不覆盖）。
-	// device_id 在 IMEI 冲突分支里会被更新为 excluded.device_id，把 DBus 定位信息刷新到最新 USB 口。
+	now := nowRFC3339()
+
 	q := `
 INSERT INTO modems(
     device_id, dbus_path, manufacturer, model, firmware, imei, plugin,
-    primary_port, at_ports, qmi_port, mbim_port, usb_path, present, last_seen_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+    primary_port, at_ports, qmi_port, mbim_port, usb_path,
+    present, first_seen_at, last_seen_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
 ON CONFLICT(` + conflictKey + `) DO UPDATE SET
     device_id    = excluded.device_id,
     dbus_path    = excluded.dbus_path,
@@ -74,11 +93,12 @@ ON CONFLICT(` + conflictKey + `) DO UPDATE SET
     mbim_port    = excluded.mbim_port,
     usb_path     = excluded.usb_path,
     present      = 1,
-    last_seen_at = CURRENT_TIMESTAMP
+    last_seen_at = excluded.last_seen_at
 `
 	if _, err := s.db.ExecContext(ctx, q,
 		m.DeviceID, m.DBusPath, m.Manufacturer, m.Model, m.Revision, imeiArg, m.Plugin,
 		m.PrimaryPort, string(atPortsJSON), qmiPort, mbimPort, m.USBPath,
+		now, now,
 	); err != nil {
 		return 0, fmt.Errorf("upsert modem: %w", err)
 	}
@@ -95,8 +115,8 @@ ON CONFLICT(` + conflictKey + `) DO UPDATE SET
 // MarkModemAbsent 在 modem 从 DBus 消失时调用，present 置 0。device_id 行本身保留。
 func (s *Store) MarkModemAbsent(ctx context.Context, deviceID string) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE modems SET present = 0, last_seen_at = CURRENT_TIMESTAMP WHERE device_id = ?`,
-		deviceID)
+		`UPDATE modems SET present = 0, last_seen_at = ? WHERE device_id = ?`,
+		nowRFC3339(), deviceID)
 	return err
 }
 
@@ -105,8 +125,7 @@ func (s *Store) MarkModemAbsent(ctx context.Context, deviceID string) error {
 //
 // 用途：服务启动时可能残留旧 device_id 的幽灵记录（比如上次运行时 present=1，
 // 用户关机换了 USB 口再开机，新 device_id 被 upsert 进来，但老 device_id 的那条
-// 仍是 present=1）。迁移 0003 会合并同 IMEI 的行，但对"IMEI 在 DB 里但这次没见到"
-// 的历史幽灵也需要一次扫除。
+// 仍是 present=1）。
 //
 // 特殊情况：seenDeviceIDs 为空 → 不做任何事，避免在 provider 尚未识别到任何模块
 // 时把全库模块都清成 absent。
@@ -138,9 +157,11 @@ func (s *Store) MarkStaleModemsAbsent(ctx context.Context, seenDeviceIDs []strin
 		return 0, fmt.Errorf("unbind stale modems: %w", err)
 	}
 
+	// 更新时追加一个额外的时间戳参数
+	updateArgs := append([]any{nowRFC3339()}, args...)
 	res, err := tx.ExecContext(ctx,
-		`UPDATE modems SET present = 0, last_seen_at = CURRENT_TIMESTAMP
-         WHERE present = 1 AND device_id NOT IN (`+inList+`)`, args...)
+		`UPDATE modems SET present = 0, last_seen_at = ?
+         WHERE present = 1 AND device_id NOT IN (`+inList+`)`, updateArgs...)
 	if err != nil {
 		return 0, fmt.Errorf("mark stale modems absent: %w", err)
 	}
@@ -187,33 +208,34 @@ func (s *Store) UnbindModem(ctx context.Context, modemID int64) error {
 
 // UpsertSim upsert SIM 行，并同步更新 modem ↔ sim 绑定。返回 sim.id。
 //
-// 当 sim.ICCID 为空但 IMSI 不为空时，使用 "imsi:<IMSI>" 作为合成标识保证可持久化
-// （某些 MBIM 固件如 Huawei ME906s 不上报 ICCID，但 IMSI 可读）。两者均为空时返回 0。
+// 只有存在真实 ICCID 才入库。空 ICCID 直接返回 (0, nil) —— 不再用
+// "imsi:<IMSI>" 合成 fallback，避免把同一张卡在不同时间点 ICCID 可读/不可读
+// 分裂成两行历史。
 func (s *Store) UpsertSim(ctx context.Context, sim SimState, modemID int64) (int64, error) {
-	iccid := sim.ICCID
-	if iccid == "" {
-		if sim.IMSI == "" {
-			return 0, nil
-		}
-		iccid = "imsi:" + sim.IMSI
+	if sim.ICCID == "" {
+		return 0, nil
 	}
+	iccid := sim.ICCID
 
 	cardType := "psim"
 	if strings.EqualFold(sim.SimType, "esim") {
 		cardType = "sticker_esim"
 	}
 
+	now := nowRFC3339()
+
 	const q = `
 INSERT INTO sims(
-    iccid, imsi, msisdn, operator_id, operator_name, card_type, last_seen_at
-) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    iccid, imsi, msisdn, operator_id, operator_name, card_type,
+    first_seen_at, last_seen_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(iccid) DO UPDATE SET
     imsi          = CASE WHEN excluded.imsi <> '' THEN excluded.imsi ELSE sims.imsi END,
     msisdn        = CASE WHEN excluded.msisdn IS NOT NULL AND excluded.msisdn <> '' THEN excluded.msisdn ELSE sims.msisdn END,
     operator_id   = CASE WHEN excluded.operator_id <> '' THEN excluded.operator_id ELSE sims.operator_id END,
     operator_name = CASE WHEN excluded.operator_name <> '' THEN excluded.operator_name ELSE sims.operator_name END,
     card_type     = excluded.card_type,
-    last_seen_at  = CURRENT_TIMESTAMP
+    last_seen_at  = excluded.last_seen_at
 `
 	var msisdnArg any
 	if sim.MSISDN != "" {
@@ -223,6 +245,7 @@ ON CONFLICT(iccid) DO UPDATE SET
 	}
 	if _, err := s.db.ExecContext(ctx, q,
 		iccid, sim.IMSI, msisdnArg, sim.OperatorID, sim.OperatorName, cardType,
+		now, now,
 	); err != nil {
 		return 0, fmt.Errorf("upsert sim: %w", err)
 	}
@@ -236,20 +259,29 @@ ON CONFLICT(iccid) DO UPDATE SET
 	if modemID > 0 {
 		if _, err := s.db.ExecContext(ctx, `
 INSERT INTO modem_sim_bindings(modem_id, sim_id, bound_at)
-VALUES (?, ?, CURRENT_TIMESTAMP)
+VALUES (?, ?, ?)
 ON CONFLICT(modem_id) DO UPDATE SET
     sim_id   = excluded.sim_id,
-    bound_at = CURRENT_TIMESTAMP
-`, modemID, simID); err != nil {
+    bound_at = excluded.bound_at
+`, modemID, simID, now); err != nil {
 			return simID, fmt.Errorf("bind modem sim: %w", err)
 		}
 	}
 	return simID, nil
 }
 
-// InsertSMS 将一条 SMS 写入 db。冲突键为 (sim_id, ext_id)，冲突时转为更新 state。
-// sim_id 可以为 0（NULL）。
-func (s *Store) InsertSMS(ctx context.Context, rec SMSRecord, modemID, simID int64) error {
+// InsertSMS 将一条 SMS 写入 db。去重键为 source_key（"mm:<deviceID>:<ext_id>"）。
+// 冲突时更新 state / body（若新 body 非空）/ ts_received / ts_sent / error_message。
+// sim_id / modem_id 可以为 0（NULL）。
+func (s *Store) InsertSMS(ctx context.Context, rec SMSRecord, deviceID string, modemID, simID int64) error {
+	if rec.ExtID == "" {
+		return errors.New("sms record missing ext_id")
+	}
+	if deviceID == "" {
+		return errors.New("sms insert requires deviceID for source_key")
+	}
+	sourceKey := sourceKeyForSMS(deviceID, rec.ExtID)
+
 	var simArg any
 	if simID > 0 {
 		simArg = simID
@@ -268,32 +300,42 @@ func (s *Store) InsertSMS(ctx context.Context, rec SMSRecord, modemID, simID int
 	}
 	var tsSent any
 	if rec.State == "sent" {
-		tsSent = time.Now().UTC().Format(time.RFC3339)
+		tsSent = nowRFC3339()
 	}
 
-	// 使用 INSERT OR IGNORE 再做一次 UPDATE，更稳健地处理冲突 & NULL sim_id 的 UNIQUE 行为差异。
-	res, err := s.db.ExecContext(ctx, `
-INSERT INTO sms(sim_id, modem_id, direction, state, peer, body, ext_id, ts_received, ts_sent)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(sim_id, ext_id) DO UPDATE SET
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO sms(sim_id, modem_id, direction, state, peer, body, ext_id, source_key,
+                ts_received, ts_created, ts_sent)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(source_key) DO UPDATE SET
     state       = excluded.state,
     body        = CASE WHEN excluded.body <> '' THEN excluded.body ELSE sms.body END,
     ts_received = COALESCE(excluded.ts_received, sms.ts_received),
     ts_sent     = COALESCE(excluded.ts_sent, sms.ts_sent)
 `,
-		simArg, modemArg, rec.Direction, rec.State, rec.Peer, rec.Text, rec.ExtID, tsRecv, tsSent,
+		simArg, modemArg, rec.Direction, rec.State, rec.Peer, rec.Text,
+		rec.ExtID, sourceKey, tsRecv, nowRFC3339(), tsSent,
 	)
 	if err != nil {
 		return fmt.Errorf("insert sms: %w", err)
 	}
-	_, _ = res.RowsAffected()
 	return nil
 }
 
-// UpdateSMSState 按 ext_id 更新状态；若 ext_id 匹配多行（不同 sim_id）则一起更新。
-func (s *Store) UpdateSMSState(ctx context.Context, extID, state string) error {
+// UpdateSMSState 按 source_key 更新 state（以及可选的 error_message）。
+// 调用方提供 deviceID + extID（runner 有这俩上下文）。
+func (s *Store) UpdateSMSState(ctx context.Context, deviceID, extID, state, errMsg string) error {
+	if deviceID == "" || extID == "" {
+		return nil
+	}
+	sourceKey := sourceKeyForSMS(deviceID, extID)
+	var errArg any
+	if errMsg != "" {
+		errArg = errMsg
+	}
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE sms SET state = ? WHERE ext_id = ?`, state, extID)
+		`UPDATE sms SET state = ?, error_message = COALESCE(?, error_message) WHERE source_key = ?`,
+		state, errArg, sourceKey)
 	return err
 }
 
@@ -307,11 +349,12 @@ func (s *Store) InsertSignalSample(ctx context.Context, modemID, simID int64, sa
 	}
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO signal_samples(
-    modem_id, sim_id, quality_pct, rssi_dbm, rsrp_dbm, rsrq_db,
+    modem_id, sim_id, quality_pct, rssi_dbm, rsrp_dbm, rsrq_db, snr_db,
     access_tech, registration, operator_id, operator_name, sampled_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		modemID, simArg, sample.QualityPct,
 		nullableInt(sample.RSSIdBm), nullableInt(sample.RSRPdBm), nullableInt(sample.RSRQdB),
+		nullableFloat(sample.SNRdB),
 		sample.AccessTech, sample.Registration, sample.OperatorID, sample.OperatorName,
 		sample.SampledAt.UTC().Format(time.RFC3339),
 	)
@@ -360,14 +403,14 @@ func (s *Store) AppendUSSD(ctx context.Context, sessionID, dir, text string, mod
 SELECT id, transcript FROM ussd_sessions
 WHERE modem_id = ? AND state IN ('active','user_response')
 ORDER BY id DESC LIMIT 1`, modemID).Scan(&id, &transcript)
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := nowRFC3339()
 	entry := map[string]string{"dir": dir, "ts": now, "text": text}
 
 	if errors.Is(err, sql.ErrNoRows) {
 		arr, _ := json.Marshal([]map[string]string{entry})
 		_, err = tx.ExecContext(ctx, `
-INSERT INTO ussd_sessions(modem_id, initial_request, state, transcript)
-VALUES (?, ?, 'active', ?)`, modemID, text, string(arr))
+INSERT INTO ussd_sessions(modem_id, initial_request, state, transcript, started_at)
+VALUES (?, ?, 'active', ?, ?)`, modemID, text, string(arr), now)
 		if err != nil {
 			return err
 		}
@@ -391,8 +434,8 @@ func (s *Store) SetUSSDState(ctx context.Context, modemID int64, state string) e
 	finished := state == "terminated" || state == "failed" || state == "idle"
 	if finished {
 		_, err := s.db.ExecContext(ctx, `
-UPDATE ussd_sessions SET state = ?, ended_at = CURRENT_TIMESTAMP
-WHERE modem_id = ? AND state IN ('active','user_response')`, state, modemID)
+UPDATE ussd_sessions SET state = ?, ended_at = ?
+WHERE modem_id = ? AND state IN ('active','user_response')`, state, nowRFC3339(), modemID)
 		return err
 	}
 	_, err := s.db.ExecContext(ctx, `
@@ -423,6 +466,13 @@ func firstPortByType(ports []Port, typ string) string {
 }
 
 func nullableInt(p *int) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+func nullableFloat(p *float64) any {
 	if p == nil {
 		return nil
 	}

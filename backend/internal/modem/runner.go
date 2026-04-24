@@ -224,7 +224,7 @@ func (r *Runner) handle(ctx context.Context, ev Event) {
 		}
 		modemID := r.getModemID(ctx, ev.DeviceID)
 		simID := r.getSimID(ctx, ev.DeviceID, modemID)
-		if err := r.store.InsertSMS(ctx, rec, modemID, simID); err != nil {
+		if err := r.store.InsertSMS(ctx, rec, ev.DeviceID, modemID, simID); err != nil {
 			r.log.Error("insert sms failed", "err", err)
 			return
 		}
@@ -239,11 +239,14 @@ func (r *Runner) handle(ctx context.Context, ev Event) {
 		}
 		modemID := r.getModemID(ctx, ev.DeviceID)
 		simID := r.getSimID(ctx, ev.DeviceID, modemID)
-		// 对于 outbound，我们在第一次出现时也要插入
-		if err := r.store.InsertSMS(ctx, rec, modemID, simID); err != nil {
+		// 对于 outbound，我们在第一次出现时也要插入；InsertSMS 自身走
+		// source_key 去重，所以反复调用是幂等的。
+		if err := r.store.InsertSMS(ctx, rec, ev.DeviceID, modemID, simID); err != nil {
 			r.log.Debug("upsert sms failed", "err", err)
 		}
-		_ = r.store.UpdateSMSState(ctx, rec.ExtID, rec.State)
+		// 单独再调 UpdateSMSState：即便 InsertSMS 的 ON CONFLICT 已经覆盖 state，
+		// 这里保留显式 update 以确保即便 insert 被短路也能追上（例如 ext_id 被上游改动）。
+		_ = r.store.UpdateSMSState(ctx, ev.DeviceID, rec.ExtID, rec.State, "")
 
 	case EventUSSDStateChanged:
 		u, ok := ev.Payload.(USSDState)

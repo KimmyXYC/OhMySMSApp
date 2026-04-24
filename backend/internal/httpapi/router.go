@@ -21,6 +21,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/KimmyXYC/ohmysmsapp/backend/internal/audit"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/auth"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/config"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/modem"
@@ -33,11 +34,6 @@ type TelegramController interface {
 	TestPush(ctx context.Context, text string) error
 }
 
-// TelegramReloader 保留作为向后兼容别名。新代码请使用 TelegramController。
-//
-// Deprecated: 使用 TelegramController。
-type TelegramReloader = TelegramController
-
 // Deps 聚合 HTTP 层依赖。
 type Deps struct {
 	Version string
@@ -48,6 +44,7 @@ type Deps struct {
 	ModemRunner *modem.Runner
 	Store       *modem.Store
 	Auth        *auth.Service
+	Audit       *audit.Service // 审计日志服务；可为 nil（不记录）
 
 	// WS handler（/ws 端点）；由 main.go 注入 hub.ServeHTTP
 	WSHandler http.Handler
@@ -94,6 +91,7 @@ func NewRouter(deps Deps) http.Handler {
 			registerUSSD(pr, deps)
 			registerSignal(pr, deps)
 			registerSettings(pr, deps)
+			registerAudit(pr, deps)
 		})
 	})
 

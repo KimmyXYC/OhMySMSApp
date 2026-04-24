@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/KimmyXYC/ohmysmsapp/backend/internal/audit"
 )
 
 type ussdInitReq struct {
@@ -60,9 +62,24 @@ func registerUSSD(r chi.Router, deps Deps) {
 
 		sid, reply, err := deps.Modem.InitiateUSSD(req.Context(), deviceID, body.Command)
 		if err != nil {
+			logAudit(req.Context(), deps, audit.Entry{
+				Actor:   actorFromRequest(req),
+				Action:  "ussd.start",
+				Target:  deviceID,
+				Payload: map[string]any{"command": body.Command},
+				Result:  "error",
+				Err:     err.Error(),
+			})
 			writeError(w, http.StatusInternalServerError, "ussd_failed", err.Error())
 			return
 		}
+		logAudit(req.Context(), deps, audit.Entry{
+			Actor:   actorFromRequest(req),
+			Action:  "ussd.start",
+			Target:  deviceID,
+			Payload: map[string]any{"command": body.Command, "reply_len": len(reply)},
+			Result:  "ok",
+		})
 		// 简化：MM event 的 state 会被 Runner 落库；我们无法精准拿到
 		// "是否需要 respond"。provider.InitiateUSSD 的返回值没有带 state，
 		// 因此这里返回 state=terminated（最常见）。前端发现真的是 user_response
@@ -90,9 +107,24 @@ func registerUSSD(r chi.Router, deps Deps) {
 		}
 		reply, err := deps.Modem.RespondUSSD(req.Context(), sid, body.Response)
 		if err != nil {
+			logAudit(req.Context(), deps, audit.Entry{
+				Actor:   actorFromRequest(req),
+				Action:  "ussd.respond",
+				Target:  sid,
+				Payload: map[string]any{"response_len": len(body.Response)},
+				Result:  "error",
+				Err:     err.Error(),
+			})
 			writeError(w, http.StatusInternalServerError, "ussd_failed", err.Error())
 			return
 		}
+		logAudit(req.Context(), deps, audit.Entry{
+			Actor:   actorFromRequest(req),
+			Action:  "ussd.respond",
+			Target:  sid,
+			Payload: map[string]any{"response_len": len(body.Response), "reply_len": len(reply)},
+			Result:  "ok",
+		})
 		writeJSON(w, http.StatusOK, ussdResponse{
 			SessionID: sid, Reply: reply, State: "terminated",
 		})
@@ -101,9 +133,22 @@ func registerUSSD(r chi.Router, deps Deps) {
 	r.Delete("/ussd/{session_id}", func(w http.ResponseWriter, req *http.Request) {
 		sid := chi.URLParam(req, "session_id")
 		if err := deps.Modem.CancelUSSD(req.Context(), sid); err != nil {
+			logAudit(req.Context(), deps, audit.Entry{
+				Actor:  actorFromRequest(req),
+				Action: "ussd.cancel",
+				Target: sid,
+				Result: "error",
+				Err:    err.Error(),
+			})
 			writeError(w, http.StatusInternalServerError, "ussd_failed", err.Error())
 			return
 		}
+		logAudit(req.Context(), deps, audit.Entry{
+			Actor:  actorFromRequest(req),
+			Action: "ussd.cancel",
+			Target: sid,
+			Result: "ok",
+		})
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 

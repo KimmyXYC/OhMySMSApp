@@ -178,7 +178,24 @@ onUnmounted(() => {
 })
 
 function handleReset() {
-  ElMessage.info('功能计划中，后端尚未实现')
+  if (!deviceId.value) return
+  resetModem(deviceId.value)
+    .then((resp) => {
+      if (resp.status === 202) {
+        ElMessage.success('重置请求已提交')
+      } else {
+        ElMessage.success(resp.data?.message ?? '重置请求已提交')
+      }
+    })
+    .catch((e: any) => {
+      const status = e.response?.status
+      const code = e.response?.data?.code
+      if (status === 501 || code === 'reset_unsupported') {
+        ElMessage.warning('该模块不支持重置')
+      } else {
+        ElMessage.error(e.response?.data?.error || '重置失败')
+      }
+    })
 }
 
 // 获取端口列表
@@ -238,11 +255,9 @@ const portList = computed(() => {
           <el-button type="primary" plain @click="goToSms">
             查看该模块短信
           </el-button>
-          <el-tooltip content="功能计划中，后端尚未实现" placement="bottom">
-            <el-button type="warning" disabled @click="handleReset">
-              重置模块
-            </el-button>
-          </el-tooltip>
+          <el-button type="warning" @click="handleReset">
+            重置模块
+          </el-button>
         </div>
       </template>
     </el-page-header>

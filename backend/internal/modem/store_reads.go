@@ -87,18 +87,19 @@ type USSDRow struct {
 
 // SignalRow 对应 signal_samples 表。
 type SignalRow struct {
-	ID           int64   `json:"id"`
-	ModemID      int64   `json:"modem_id"`
-	SimID        *int64  `json:"sim_id"`
-	QualityPct   *int    `json:"quality_pct"`
-	RSSIdBm      *int    `json:"rssi_dbm"`
-	RSRPdBm      *int    `json:"rsrp_dbm"`
-	RSRQdB       *int    `json:"rsrq_db"`
-	AccessTech   *string `json:"access_tech"`
-	Registration *string `json:"registration"`
-	OperatorID   *string `json:"operator_id"`
-	OperatorName *string `json:"operator_name"`
-	SampledAt    string  `json:"sampled_at"`
+	ID           int64    `json:"id"`
+	ModemID      int64    `json:"modem_id"`
+	SimID        *int64   `json:"sim_id"`
+	QualityPct   *int     `json:"quality_pct"`
+	RSSIdBm      *int     `json:"rssi_dbm"`
+	RSRPdBm      *int     `json:"rsrp_dbm"`
+	RSRQdB       *int     `json:"rsrq_db"`
+	SNRdB        *float64 `json:"snr_db"`
+	AccessTech   *string  `json:"access_tech"`
+	Registration *string  `json:"registration"`
+	OperatorID   *string  `json:"operator_id"`
+	OperatorName *string  `json:"operator_name"`
+	SampledAt    string   `json:"sampled_at"`
 }
 
 // ThreadRow 聚合短信会话一行。
@@ -243,12 +244,12 @@ WHERE id = (SELECT sim_id FROM modem_sim_bindings WHERE modem_id = ?)`, modemID)
 // latestSignal 查某 modem 最新一条 signal 采样。
 func (s *Store) latestSignal(ctx context.Context, modemID int64) (*SignalRow, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT id, modem_id, sim_id, quality_pct, rssi_dbm, rsrp_dbm,
-rsrq_db, access_tech, registration, operator_id, operator_name, sampled_at
+rsrq_db, snr_db, access_tech, registration, operator_id, operator_name, sampled_at
 FROM signal_samples WHERE modem_id = ? ORDER BY id DESC LIMIT 1`, modemID)
 	var sig SignalRow
 	if err := row.Scan(
 		&sig.ID, &sig.ModemID, &sig.SimID, &sig.QualityPct, &sig.RSSIdBm, &sig.RSRPdBm,
-		&sig.RSRQdB, &sig.AccessTech, &sig.Registration, &sig.OperatorID, &sig.OperatorName,
+		&sig.RSRQdB, &sig.SNRdB, &sig.AccessTech, &sig.Registration, &sig.OperatorID, &sig.OperatorName,
 		&sig.SampledAt,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -457,38 +458,8 @@ transcript, started_at, ended_at FROM ussd_sessions WHERE id = ?`, id)
 	return &r, nil
 }
 
-// CreateUSSDSession 创建 USSD 会话行，返回 id。供 HTTP 层（不走 event）手动创建。
-func (s *Store) CreateUSSDSession(ctx context.Context, modemID int64, simID int64, request, state, transcriptJSON string) (int64, error) {
-	var simArg any
-	if simID > 0 {
-		simArg = simID
-	}
-	var modemArg any
-	if modemID > 0 {
-		modemArg = modemID
-	}
-	if transcriptJSON == "" {
-		transcriptJSON = "[]"
-	}
-	res, err := s.db.ExecContext(ctx, `INSERT INTO ussd_sessions(modem_id, sim_id, initial_request, state, transcript)
-VALUES (?, ?, ?, ?, ?)`, modemArg, simArg, request, state, transcriptJSON)
-	if err != nil {
-		return 0, err
-	}
-	return res.LastInsertId()
-}
-
-// UpdateUSSDSession 更新 state + transcript。endAt 为 true 时同时设置 ended_at=now。
-func (s *Store) UpdateUSSDSession(ctx context.Context, id int64, state, transcriptJSON string, endAt bool) error {
-	if endAt {
-		_, err := s.db.ExecContext(ctx, `UPDATE ussd_sessions SET state = ?, transcript = ?, ended_at = CURRENT_TIMESTAMP WHERE id = ?`,
-			state, transcriptJSON, id)
-		return err
-	}
-	_, err := s.db.ExecContext(ctx, `UPDATE ussd_sessions SET state = ?, transcript = ? WHERE id = ?`,
-		state, transcriptJSON, id)
-	return err
-}
+// CreateUSSDSession / UpdateUSSDSession 已删除：HTTP USSD handler 走事件 →
+// runner.AppendUSSD + SetUSSDState 路径，不再需要手动建 session row。
 
 // ListSignalHistory 返回某 modem 的信号采样历史（按 sampled_at DESC）。
 func (s *Store) ListSignalHistory(ctx context.Context, modemID int64, since time.Time, limit int) ([]SignalRow, error) {
@@ -499,7 +470,7 @@ func (s *Store) ListSignalHistory(ctx context.Context, modemID int64, since time
 		limit = 1000
 	}
 	args := []any{modemID}
-	q := `SELECT id, modem_id, sim_id, quality_pct, rssi_dbm, rsrp_dbm, rsrq_db,
+	q := `SELECT id, modem_id, sim_id, quality_pct, rssi_dbm, rsrp_dbm, rsrq_db, snr_db,
 access_tech, registration, operator_id, operator_name, sampled_at
 FROM signal_samples WHERE modem_id = ?`
 	if !since.IsZero() {
@@ -518,7 +489,7 @@ FROM signal_samples WHERE modem_id = ?`
 	for rows.Next() {
 		var r SignalRow
 		if err := rows.Scan(&r.ID, &r.ModemID, &r.SimID, &r.QualityPct, &r.RSSIdBm, &r.RSRPdBm,
-			&r.RSRQdB, &r.AccessTech, &r.Registration, &r.OperatorID, &r.OperatorName, &r.SampledAt); err != nil {
+			&r.RSRQdB, &r.SNRdB, &r.AccessTech, &r.Registration, &r.OperatorID, &r.OperatorName, &r.SampledAt); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -541,7 +512,8 @@ func (s *Store) GetSetting(ctx context.Context, key string) (string, error) {
 // PutSetting upsert settings(key, value)。
 func (s *Store) PutSetting(ctx context.Context, key, value string) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO settings(key, value, updated_at)
-VALUES (?, ?, CURRENT_TIMESTAMP)
-ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`, key, value)
+VALUES (?, ?, ?)
+ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		key, value, time.Now().UTC().Format(time.RFC3339))
 	return err
 }

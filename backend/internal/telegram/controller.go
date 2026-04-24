@@ -9,6 +9,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"github.com/KimmyXYC/ohmysmsapp/backend/internal/audit"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/config"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/modem"
 )
@@ -23,6 +24,7 @@ type Controller struct {
 	provider modem.Provider
 	runner   *modem.Runner
 	store    *modem.Store
+	audit    *audit.Service
 	log      *slog.Logger
 
 	parent context.Context
@@ -31,8 +33,10 @@ type Controller struct {
 	current *bot
 }
 
-// NewController 构造 controller。provider/runner/store 不可为 nil。
-func NewController(provider modem.Provider, runner *modem.Runner, store *modem.Store, log *slog.Logger) *Controller {
+// NewController 构造 controller。provider/runner/store 不可为 nil；audit 可为 nil。
+func NewController(provider modem.Provider, runner *modem.Runner, store *modem.Store,
+	auditSvc *audit.Service, log *slog.Logger,
+) *Controller {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -40,6 +44,7 @@ func NewController(provider modem.Provider, runner *modem.Runner, store *modem.S
 		provider: provider,
 		runner:   runner,
 		store:    store,
+		audit:    auditSvc,
 		log:      log,
 	}
 }
@@ -90,7 +95,7 @@ func (c *Controller) startLocked(cfg config.TelegramConfig) error {
 		return nil
 	}
 	b, err := newBot(c.parent, cfg.BotToken, cfg.ChatID, cfg.PushSMS,
-		c.provider, c.runner, c.store, c.log)
+		c.provider, c.runner, c.store, c.audit, c.log)
 	if err != nil {
 		c.log.Warn("telegram bot start failed", "err", err)
 		return err

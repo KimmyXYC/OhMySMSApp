@@ -343,9 +343,9 @@ func (p *MMProvider) initialReconcile(ctx context.Context) error {
 			p.onModemAdded(ctx, path, ifaces)
 		}
 	}
-	// 对每个已订阅 modem，通过 Messaging.List 拿到它的 SMS paths 并登记，
-	// 以便 onSmsAppeared 在查反查表时能正确关联到 modem。
-	// （GetManagedObjects 的 SMS 对象不携带 modem 关系，单独遍历 SMS 路径无法知道归属）
+	// 对每个已订阅 modem，通过 Messaging.List 拿到它的 SMS paths；
+	// 直接调 onSmsAppearedForModem 路径（和 live Messaging.Added 走同一入口），
+	// 它会加锁登记 SMSPaths，订阅 PropertiesChanged，然后读一次并 emit 事件。
 	p.mu.RLock()
 	modemsSnap := make([]struct {
 		DevID    string
@@ -367,24 +367,8 @@ func (p *MMProvider) initialReconcile(ctx context.Context) error {
 				"device", m.DevID, "err", err)
 			continue
 		}
-		// 先登记所有该 modem 的 SMS path 到 SMSPaths，再订阅 + 读。
-		p.mu.Lock()
-		if entry, ok := p.modems[m.DevID]; ok {
-			for _, sp := range smsPaths {
-				entry.SMSPaths[sp] = true
-			}
-		}
-		p.mu.Unlock()
 		for _, sp := range smsPaths {
-			p.onSmsAppeared(sp)
-			if rec, err := p.readSMS(conn, sp); err == nil {
-				p.emit(Event{
-					Kind:     EventSMSStateChanged,
-					DeviceID: m.DevID,
-					Payload:  rec,
-					At:       time.Now(),
-				})
-			}
+			p.onSmsAppearedForModem(m.DevID, sp)
 		}
 	}
 	return nil
@@ -403,9 +387,8 @@ func (p *MMProvider) handleSignal(ctx context.Context, sig *dbus.Signal) {
 		if _, ok := ifaces[ifaceModem]; ok {
 			p.onModemAdded(ctx, path, ifaces)
 		}
-		if _, ok := ifaces[ifaceSms]; ok {
-			p.onSmsAppeared(path)
-		}
+		// 注意：InterfacesAdded 本身不携带 modem 归属信息，这里不尝试处理 SMS 对象；
+		// MM 会同时 emit Messaging.Added 信号（sender path = modem path），那里做关联。
 
 	case ifaceObjectManager + ".InterfacesRemoved":
 		var path dbus.ObjectPath
@@ -437,8 +420,19 @@ func (p *MMProvider) handleSignal(ctx context.Context, sig *dbus.Signal) {
 		if err := dbus.Store(sig.Body, &smsPath, &received); err != nil {
 			return
 		}
-		p.log.Debug("sms added", "path", smsPath, "received", received)
-		p.onSmsAppeared(smsPath)
+		// Messaging.Added 的信号 sender path 就是 modem 路径，可直接反查 deviceID；
+		// 不再依赖脆弱的 SMSPaths 预填 + byPath/ReverseLookup 组合。
+		p.mu.RLock()
+		deviceID, known := p.byPath[sig.Path]
+		p.mu.RUnlock()
+		p.log.Debug("sms added",
+			"modem_path", sig.Path, "sms_path", smsPath,
+			"received", received, "device", deviceID)
+		if !known {
+			p.log.Warn("sms added for unknown modem path", "path", sig.Path)
+			return
+		}
+		p.onSmsAppearedForModem(deviceID, smsPath)
 		// 当 received=true 时，state 可能还是 RECEIVING；依赖 PropertiesChanged → RECEIVED。
 
 	case ifaceMessaging + ".Deleted":
@@ -640,7 +634,19 @@ func (p *MMProvider) onPropertiesChanged(ctx context.Context, path dbus.ObjectPa
 	case ifaceModem:
 		p.applyModemProps(entry, changed)
 		if sp, ok := changed["Sim"]; ok {
-			if newPath, _ := sp.Value().(dbus.ObjectPath); newPath != "" && newPath != "/" {
+			newPath, _ := sp.Value().(dbus.ObjectPath)
+			switch {
+			case newPath == "" || newPath == "/":
+				// SIM 被拔出：清空内存 SIM 快照并 emit update。
+				// DB 层的 modem↔sim 绑定清理由 runner.go 在收到
+				// EventModemUpdated 且 state.SIM == nil 时处理。
+				p.mu.Lock()
+				entry.State.SIM = nil
+				entry.State.HasSim = false
+				entry.SIMPath = ""
+				p.mu.Unlock()
+				p.log.Info("sim removed", "device", deviceID)
+			default:
 				if sim, err := p.readSim(conn, newPath); err == nil {
 					p.mu.Lock()
 					entry.State.SIM = &sim
@@ -775,17 +781,34 @@ func (p *MMProvider) onUSSDPropsChanged(entry *modemEntry, deviceID string,
 	p.emit(Event{Kind: EventUSSDStateChanged, DeviceID: deviceID, Payload: snap, At: time.Now()})
 }
 
-// onSmsAppeared 新增一个 SMS path：订阅其 PropertiesChanged。
-// 收到后立即尝试读一次；若当时 State=RECEIVED 则发 EventSMSReceived。
-func (p *MMProvider) onSmsAppeared(path dbus.ObjectPath) {
+// onSmsAppearedForModem 新增一个 SMS path 并关联到指定 modem。
+//
+// 流程（持锁下完成登记，避免竞态）：
+//  1. 若 path 已订阅过，直接返回（幂等）。
+//  2. AddMatchSignal 订阅该 SMS 的 PropertiesChanged（在 conn 上；锁内做因为
+//     godbus 的 AddMatchSignal 内部也是同步调用，性能可接受）。
+//  3. 写入 smsSubs + modemEntry.SMSPaths，确保后续 deviceIDForSMSPath 能反查到。
+//  4. 出锁后读取 SMS 属性并 emit 初始事件（REC'D → EventSMSReceived，否则 StateChanged）。
+//
+// 这个路径同时供 initial reconcile + live Messaging.Added 使用，
+// 不再需要额外的"先预填 SMSPaths 再调 onSmsAppeared"特殊流程。
+func (p *MMProvider) onSmsAppearedForModem(deviceID string, path dbus.ObjectPath) {
+	if deviceID == "" {
+		p.log.Warn("onSmsAppearedForModem with empty deviceID", "path", path)
+		return
+	}
 	p.mu.Lock()
 	if _, exists := p.smsSubs[path]; exists {
+		// 已订阅，仅确保 SMSPaths 反查表上也有登记（修复 reload 边缘情况）。
+		if entry, ok := p.modems[deviceID]; ok {
+			entry.SMSPaths[path] = true
+		}
 		p.mu.Unlock()
 		return
 	}
 	conn := p.conn
-	p.mu.Unlock()
 	if conn == nil {
+		p.mu.Unlock()
 		return
 	}
 	matches := []dbus.MatchOption{
@@ -795,29 +818,24 @@ func (p *MMProvider) onSmsAppeared(path dbus.ObjectPath) {
 		dbus.WithMatchSender(mmService),
 	}
 	if err := conn.AddMatchSignal(matches...); err != nil {
+		p.mu.Unlock()
 		p.log.Debug("add sms match failed", "path", path, "err", err)
 		return
 	}
-	p.mu.Lock()
 	p.smsSubs[path] = matches
-	// 关联到 modem entry，方便 modem 移除时清理
-	deviceID := p.deviceIDForSMSPathLocked(path)
 	if entry, ok := p.modems[deviceID]; ok {
 		entry.SMSPaths[path] = true
 	}
 	p.mu.Unlock()
 
-	// 立即读一次；若已 RECEIVED 则直接发事件
+	// 出锁读 SMS。读失败也没关系——后续 PropertiesChanged 会再触发。
 	if rec, err := p.readSMS(conn, path); err == nil {
+		kind := EventSMSStateChanged
 		if rec.State == "received" && rec.Direction == "inbound" {
-			p.emit(Event{
-				Kind: EventSMSReceived, DeviceID: p.deviceIDForSMSPath(path),
-				Payload: rec, At: time.Now(),
-			})
-			return
+			kind = EventSMSReceived
 		}
 		p.emit(Event{
-			Kind: EventSMSStateChanged, DeviceID: p.deviceIDForSMSPath(path),
+			Kind: kind, DeviceID: deviceID,
 			Payload: rec, At: time.Now(),
 		})
 	}

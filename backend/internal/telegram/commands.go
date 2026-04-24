@@ -6,9 +6,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"github.com/KimmyXYC/ohmysmsapp/backend/internal/audit"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/modem"
 )
 
@@ -333,12 +335,32 @@ func (b *bot) promptConfirmSend() {
 func (b *bot) executeSend(sess *Session) {
 	ctx, cancel := context.WithTimeout(b.bgCtx(), 30*time.Second)
 	defer cancel()
-	_, err := b.provider.SendSMS(ctx, sess.DeviceID, sess.Peer, sess.Text)
+	extID, err := b.provider.SendSMS(ctx, sess.DeviceID, sess.Peer, sess.Text)
 	if err != nil {
+		b.logAudit(audit.Entry{
+			Action: "sms.send",
+			Target: sess.DeviceID,
+			Payload: map[string]any{
+				"peer":     sess.Peer,
+				"body_len": utf8.RuneCountInString(sess.Text),
+			},
+			Result: "error",
+			Err:    err.Error(),
+		})
 		_, _ = b.sendText(escapeMarkdownV2("发送失败: " + err.Error()))
 		b.sessions.Delete(b.chatID)
 		return
 	}
+	b.logAudit(audit.Entry{
+		Action: "sms.send",
+		Target: sess.DeviceID,
+		Payload: map[string]any{
+			"peer":     sess.Peer,
+			"body_len": utf8.RuneCountInString(sess.Text),
+			"ext_id":   extID,
+		},
+		Result: "ok",
+	})
 	_, _ = b.sendText(escapeMarkdownV2("✅ 已提交发送"))
 	b.sessions.Delete(b.chatID)
 }
@@ -349,10 +371,23 @@ func (b *bot) executeUSSD(sess *Session) {
 	defer cancel()
 	sid, reply, err := b.provider.InitiateUSSD(ctx, sess.DeviceID, sess.Text)
 	if err != nil {
+		b.logAudit(audit.Entry{
+			Action:  "ussd.start",
+			Target:  sess.DeviceID,
+			Payload: map[string]any{"command": sess.Text},
+			Result:  "error",
+			Err:     err.Error(),
+		})
 		_, _ = b.sendText(escapeMarkdownV2("USSD 失败: " + err.Error()))
 		b.sessions.Delete(b.chatID)
 		return
 	}
+	b.logAudit(audit.Entry{
+		Action:  "ussd.start",
+		Target:  sess.DeviceID,
+		Payload: map[string]any{"command": sess.Text, "reply_len": len(reply)},
+		Result:  "ok",
+	})
 	b.sessions.Update(b.chatID, func(s *Session) {
 		s.USSDSessionID = sid
 	})
