@@ -4,6 +4,7 @@ go 1.25.8
 
 require (
 	github.com/go-chi/chi/v5 v5.2.5
+	github.com/godbus/dbus/v5 v5.2.2
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.49.1
 )

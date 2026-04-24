@@ -9,12 +9,18 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+
+	"github.com/kimmy/ohmysmsapp/backend/internal/modem"
 )
 
 // Deps 聚合 HTTP 层依赖。后续会加入 services、authService 等。
 type Deps struct {
 	Version string
 	WebRoot string // 静态站点根目录；空则不托管
+
+	// 阶段 2 注入：modem 子系统。阶段 3 再实现具体路由。
+	Modem       modem.Provider
+	ModemRunner *modem.Runner
 }
 
 // NewRouter 组装路由。

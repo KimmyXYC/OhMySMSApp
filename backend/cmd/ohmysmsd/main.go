@@ -19,6 +19,7 @@ import (
 	"github.com/kimmy/ohmysmsapp/backend/internal/db"
 	"github.com/kimmy/ohmysmsapp/backend/internal/httpapi"
 	"github.com/kimmy/ohmysmsapp/backend/internal/logging"
+	"github.com/kimmy/ohmysmsapp/backend/internal/modem"
 )
 
 // 编译期注入。Makefile 会通过 -ldflags 替换。
@@ -65,14 +66,34 @@ func run() error {
 	defer conn.Close()
 	log.Info("database ready")
 
-	// TODO(stage-2): 启动 ModemManager client 并订阅
+	// 启动 ModemManager 集成：cfg.Modem.Enabled=true 走 DBus；否则跑 mock。
+	var provider modem.Provider
+	if cfg.Modem.Enabled {
+		provider = modem.NewMMProvider(log, 256)
+		log.Info("modem provider: modemmanager")
+	} else {
+		provider = modem.NewMockProvider(log)
+		log.Info("modem provider: mock")
+	}
+	modemStore := modem.NewStore(conn)
+	runner := modem.NewRunner(provider, modemStore, log)
+
+	runnerErrCh := make(chan error, 1)
+	go func() {
+		if err := runner.Run(rootCtx); err != nil {
+			runnerErrCh <- err
+		}
+	}()
+
 	// TODO(stage-3): 启动 WS hub
 	// TODO(stage-5): 启动 Telegram bot
 	// TODO(stage-6): 初始化 ESIM runner
 
 	handler := httpapi.NewRouter(httpapi.Deps{
-		Version: version,
-		WebRoot: cfg.Server.WebRoot,
+		Version:     version,
+		WebRoot:     cfg.Server.WebRoot,
+		Modem:       provider,
+		ModemRunner: runner,
 	})
 	srv := &http.Server{
 		Addr:              cfg.Server.Listen,
@@ -93,6 +114,8 @@ func run() error {
 		log.Info("shutdown signal received")
 	case err := <-errCh:
 		return fmt.Errorf("http server: %w", err)
+	case err := <-runnerErrCh:
+		return fmt.Errorf("modem runner: %w", err)
 	}
 
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 15*time.Second)
