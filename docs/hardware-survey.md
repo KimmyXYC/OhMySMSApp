@@ -7,21 +7,28 @@
 
 ## 模块 & SIM 一览
 
-| Modem ID | 型号 | 固件 | IMEI | USB Path | AT 端口 | QMI/MBIM | 卡槽 |
-|---|---|---|---|---|---|---|---|
-| 32 | Quectel EC20-CE (EC20F) | `EC20CEHCR06A03M1G` | 863418059993006 | `1-1.2` | ttyUSB6/7 | `/dev/cdc-wdm1` (QMI) | **空** |
-| 33 | Quectel EC20-CE (EC20F) | `EC20CEHCR06A03M1G` | 863418059993014 | `1-1.1` | ttyUSB2/3 | `/dev/cdc-wdm0` (QMI) | **pSIM**（实体卡） |
-| 35 | Quectel EC20-CE (EC20F) | `EC20CEHCR06A04M1G` | 863418059993139 | `1-1.4/1-1.4.2` | ttyUSB14/15 | `/dev/cdc-wdm3` (QMI) | **5ber.eSIM** |
-| 36 | Huawei ME906s (V7R11) | `11.617.06.demo.00` | 867223020359329 | `1-1.4/1-1.4.4/1-1.4.4.2` | 无 TTY（纯 MBIM） | `/dev/cdc-wdm4` (MBIM) | **9eSIM** |
-| 37 | Quectel EC20-CE (EC20F) | `EC20CEHCR06A03M1G` | 863418059992990 | `1-1.4/1-1.4.1` | ttyUSB10/11 | `/dev/cdc-wdm2` (QMI) | **空** |
+> **注意**：MM DBus 的 `/Modem/<N>` 路径每次 MM 重启都会变，`primary_port` 的 `cdc-wdm<N>` 也会随 USB 枚举顺序变。唯一稳定的标识是 `Modem.DeviceIdentifier`（MM 生成的 hash）与 IMEI。本项目用前者做 upsert key。
 
-## 各 SIM 详情
+### 硬件变更记录
+- 2026-04-24 初次勘察：5 个模块（含 2 个空卡槽），其中 Modem37（IMEI 863418059992990）故障，已**物理拆除**
+- 当前：**4 个模块**在线
 
-| SIM | 模块 | Kind | ICCID | IMSI | 运营商 | 号码 | 信号 | 注册状态 |
-|---|---|---|---|---|---|---|---|---|
-| 12 | 33 | pSIM | `8985203105011606981` | 454031051160698 | CHN-CT (45403) | - | 84% (LTE) | roaming |
-| 13 | 35 | 5ber sticker eSIM | `8944110069156835483` | 234104846999661 | giffgaff (23410) | - | 62% (LTE, 漫游在 CMCC 46000) | roaming |
-| 14 | 36 | 9eSIM sticker eSIM | - | 262036013169687 | 德国 262 MCC (漫游 CMCC 46000) | `+491791566795` | 67% (LTE) | roaming |
+### 当前布局
+
+| IMEI | 型号 | 固件 | 卡槽 | SIM 类型 | 运营商/号码 |
+|---|---|---|---|---|---|
+| 863418059993014 | Quectel EC20-CE | `EC20CEHCR06A03M1G` | 已插卡 | **pSIM** | CHN-CT (45403) |
+| 863418059993139 | Quectel EC20-CE | `EC20CEHCR06A04M1G` | 已插卡 | **5ber sticker eSIM** | giffgaff UK，漫游 CMCC |
+| 867223020359329 | Huawei ME906s (V7R11) | `11.617.06.demo.00` | 已插卡 | **9eSIM sticker eSIM** | 德国 262，+491791566795，漫游 CMCC |
+| 863418059993006 | Quectel EC20-CE | `EC20CEHCR06A03M1G` | 空 | - | - |
+
+## 各 SIM 详情（快照，2026-04-24）
+
+| 对应模块 IMEI | Kind | ICCID | IMSI | 运营商 | 号码 | 注册状态 |
+|---|---|---|---|---|---|---|
+| 863418059993014 | pSIM | `8985203105011606981` | 454031051160698 | CHN-CT (45403) | - | roaming |
+| 863418059993139 | 5ber sticker eSIM | `8944110069156835483` | 234104846999661 | giffgaff (23410) | - | roaming 在 CMCC |
+| 867223020359329 | 9eSIM sticker eSIM | 待 lpac 读取 | 262036013169687 | 262 (德国) | `+491791566795` | roaming 在 CMCC |
 
 ## eSIM 切换能力探测
 
