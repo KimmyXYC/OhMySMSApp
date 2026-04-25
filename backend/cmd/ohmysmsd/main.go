@@ -23,6 +23,7 @@ import (
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/auth"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/config"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/db"
+	"github.com/KimmyXYC/ohmysmsapp/backend/internal/esim"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/httpapi"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/logging"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/modem"
@@ -142,6 +143,15 @@ func run() error {
 	// Telegram Bot
 	tgCfg := loadTelegramConfig(rootCtx, cfg.Telegram, modemStore)
 	tgCtl := telegram.NewController(provider, runner, modemStore, auditSvc, log)
+
+	// eSIM service（lpac + ModemManager InhibitDevice）。
+	// 即便 lpac 不可用也安全：Service 内部会检测，自动发现 / API 写操作会
+	// 返回 503 lpac_unavailable，不会影响主流程。
+	esimSvc := esim.New(cfg.ESIM, conn, modemStore, provider, runner, auditSvc, log)
+	esimSvc.Start(rootCtx)
+	defer esimSvc.Stop()
+	tgCtl.SetESIM(esimSvc)
+
 	if err := tgCtl.Start(rootCtx, tgCfg); err != nil {
 		log.Warn("telegram start failed", "err", err)
 	}
@@ -155,6 +165,7 @@ func run() error {
 		Store:       modemStore,
 		Auth:        authSvc,
 		Audit:       auditSvc,
+		ESIM:        esimSvc,
 		WSHandler:   hub,
 		Server:      cfg.Server,
 		Telegram:    cfg.Telegram,

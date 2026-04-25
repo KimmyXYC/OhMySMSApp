@@ -45,13 +45,20 @@ telegram:
 
 esim:
   # lpac 可执行文件路径。
-  lpac_bin: "/usr/local/bin/lpac"
-  # 切换 profile 期间是否对目标模块执行 mmcli --inhibit。
+  lpac_bin: "/opt/ohmysmsapp/bin/lpac"
+  # lpac 驱动 .so 目录（LIBEUICC_DRIVER_SEARCH_PATH 兜底）。
+  # 默认与 lpac_bin 同目录的 lpac-drivers/；保留默认即可。
+  lpac_drivers_dir: "/opt/ohmysmsapp/bin/lpac-drivers"
+  # 切换 profile 期间是否对目标模块执行 ModemManager InhibitDevice。
+  # 必须为 true，否则 lpac 会抢占失败。
   inhibit_modem_manager: true
-  # 已知卡商 → AID 覆盖（留空使用默认）。
-  aids:
-    fiveber: "A0000005591010000000008900000300" # 占位，首次探测后落实
-    nineesim: ""
+  # 单次 lpac 执行的最大时长。
+  operation_timeout: "30s"
+  # 同一 modem 上的自动发现冷却（避免每次状态抖动都重新跑 lpac chip info）。
+  discover_cooldown: "1h"
+  # 已知卡商 → ISD-R AID 覆盖（留空使用 lpac 默认 AID）。
+  # 实测 5ber / 9eSIM 均使用默认 AID，正常情况下保留为空。
+  aids: {}
 
 logging:
   # debug / info / warn / error

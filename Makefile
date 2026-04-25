@@ -124,6 +124,31 @@ pi-restart: ## 重启服务
 pi-stop: ## 停止服务
 	ssh $(PI_HOST) "sudo systemctl stop $(PI_SERVICE)"
 
+.PHONY: pi-install-lpac
+pi-install-lpac: ## 在树莓派上把 lpac 二进制 + 共享库 + APDU 驱动安装到 $(PI_DEST)/bin/
+	@echo "==> install lpac on $(PI_HOST) (expects /tmp/lpac/build to exist there)"
+	ssh $(PI_HOST) '\
+		set -e; \
+		test -x /tmp/lpac/build/src/lpac || (echo "lpac binary not found at /tmp/lpac/build/src/lpac" && exit 1); \
+		sudo install -m 0755 -d $(PI_DEST)/bin/driver; \
+		sudo install -m 0755 /tmp/lpac/build/src/lpac $(PI_DEST)/bin/lpac; \
+		# 把 RUNPATH 改为 $$ORIGIN，让 lpac 从同目录加载核心 .so，从 ./driver/ 加载 APDU 驱动 \
+		sudo patchelf --set-rpath "\$$ORIGIN" $(PI_DEST)/bin/lpac; \
+		# 核心库（loader / euicc / utils）放到 lpac 同目录（$$ORIGIN 命中） \
+		sudo install -m 0755 /tmp/lpac/build/driver/libeuicc-driver-loader.so.2 $(PI_DEST)/bin/; \
+		sudo install -m 0755 /tmp/lpac/build/euicc/libeuicc.so.2 $(PI_DEST)/bin/; \
+		sudo install -m 0755 /tmp/lpac/build/utils/liblpac-utils.so $(PI_DEST)/bin/; \
+		sudo ln -sf libeuicc.so.2 $(PI_DEST)/bin/libeuicc.so; \
+		sudo ln -sf libeuicc-driver-loader.so.2 $(PI_DEST)/bin/libeuicc-driver-loader.so; \
+		# APDU + HTTP 驱动放到 ./driver/（lpac loader 写死的子目录名） \
+		for so in /tmp/lpac/build/driver/driver_apdu_*.so /tmp/lpac/build/driver/driver_http_*.so; do \
+			[ -e "$$so" ] || continue; \
+			sudo install -m 0755 "$$so" $(PI_DEST)/bin/driver/; \
+		done; \
+		echo "installed:"; \
+		ls -la $(PI_DEST)/bin/lpac $(PI_DEST)/bin/*.so* $(PI_DEST)/bin/driver/ \
+	'
+
 # ---------- 清理 ----------
 
 .PHONY: clean

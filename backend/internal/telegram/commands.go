@@ -33,6 +33,8 @@ func (b *bot) dispatchCommand(msg *tgbotapi.Message, cmd, args string) {
 		b.cmdSend()
 	case "ussd":
 		b.cmdUSSD()
+	case "esim":
+		b.cmdESim()
 	case "cancel":
 		b.cmdCancel()
 	default:

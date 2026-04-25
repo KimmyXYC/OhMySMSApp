@@ -11,6 +11,7 @@ import (
 
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/audit"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/config"
+	"github.com/KimmyXYC/ohmysmsapp/backend/internal/esim"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/modem"
 )
 
@@ -25,6 +26,7 @@ type Controller struct {
 	runner   *modem.Runner
 	store    *modem.Store
 	audit    *audit.Service
+	esim     *esim.Service // 可为 nil
 	log      *slog.Logger
 
 	parent context.Context
@@ -33,7 +35,7 @@ type Controller struct {
 	current *bot
 }
 
-// NewController 构造 controller。provider/runner/store 不可为 nil；audit 可为 nil。
+// NewController 构造 controller。provider/runner/store 不可为 nil；audit/esim 可为 nil。
 func NewController(provider modem.Provider, runner *modem.Runner, store *modem.Store,
 	auditSvc *audit.Service, log *slog.Logger,
 ) *Controller {
@@ -47,6 +49,14 @@ func NewController(provider modem.Provider, runner *modem.Runner, store *modem.S
 		audit:    auditSvc,
 		log:      log,
 	}
+}
+
+// SetESIM 注入 eSIM 服务（main.go 在构造完毕后调用）。可不调，bot /esim 命令会
+// 提示功能未启用。
+func (c *Controller) SetESIM(svc *esim.Service) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.esim = svc
 }
 
 // Start 启动 Bot（如果有 token），订阅 runner 事件。
@@ -95,7 +105,7 @@ func (c *Controller) startLocked(cfg config.TelegramConfig) error {
 		return nil
 	}
 	b, err := newBot(c.parent, cfg.BotToken, cfg.ChatID, cfg.PushSMS,
-		c.provider, c.runner, c.store, c.audit, c.log)
+		c.provider, c.runner, c.store, c.audit, c.esim, c.log)
 	if err != nil {
 		c.log.Warn("telegram bot start failed", "err", err)
 		return err

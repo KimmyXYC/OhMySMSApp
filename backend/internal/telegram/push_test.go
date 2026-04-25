@@ -77,7 +77,7 @@ func testBot(t *testing.T, provider modem.Provider) (*bot, *fakeBotAPI) {
 	t.Helper()
 	fb := newFakeBotAPI()
 	b := newBotWithAPI(context.Background(), fb, 12345, true,
-		provider, nil, nil, nil, discardLogger())
+		provider, nil, nil, nil, nil, discardLogger())
 	return b, fb
 }
 
@@ -123,7 +123,7 @@ func TestPushSMS_DisabledWhenPushSMSFalse(t *testing.T) {
 	prov := modem.NewMockProvider(discardLogger())
 	fb := newFakeBotAPI()
 	b := newBotWithAPI(context.Background(), fb, 12345, false,
-		prov, nil, nil, nil, discardLogger())
+		prov, nil, nil, nil, nil, discardLogger())
 
 	dev := prov.ListModems()[0].DeviceID
 	b.dispatchEvent(modem.Event{

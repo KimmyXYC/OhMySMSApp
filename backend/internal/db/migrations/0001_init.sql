@@ -49,14 +49,45 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_modems_imei_unique ON modems(imei);
 -- device_id 也需要 UNIQUE 用作 IMEI 为空时的 ON CONFLICT 目标。
 CREATE UNIQUE INDEX IF NOT EXISTS idx_modems_device_id_unique ON modems(device_id);
 
+-- esim_cards：物理 sticker eUICC（5ber / 9eSIM 等）。
+-- eid 为稳定主键；同一张卡换插槽，eid 不变。
+-- modem_id 表示当前承载这张卡的 modem（即 lpac 操作目标）；
+-- 卡被拔出 / 换槽时通过 ESIM service 重新发现后更新。
 CREATE TABLE IF NOT EXISTS esim_cards (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    eid             TEXT UNIQUE,                    -- eUICC EID，首次 lpac 探测成功后填充
-    vendor          TEXT,                           -- fiveber / nineesim / unknown
-    nickname        TEXT,                           -- 用户可编辑别名
+    eid             TEXT UNIQUE,                    -- eUICC EID（首次 lpac 探测后填充）
+    vendor          TEXT,                           -- 5ber / 9esim / unknown
+    nickname        TEXT,                           -- 用户可编辑别名（前端备注，不写入 eUICC）
     notes           TEXT,
-    created_at      TEXT NOT NULL                   -- RFC3339 UTC
+    euicc_firmware  TEXT,                           -- lpac chip info 的 EUICCInfo2.profileVersion / firmwareVer
+    profile_version TEXT,                           -- SGP.22 profile version
+    free_nvm        INTEGER,                        -- 剩余 NVRAM (bytes)
+    modem_id        INTEGER,                        -- 当前承载它的 modem（NULL 表示未发现）
+    last_seen_at    TEXT,                           -- 最近一次 lpac chip info 成功时间 (RFC3339)
+    created_at      TEXT NOT NULL,                  -- RFC3339 UTC
+    FOREIGN KEY (modem_id) REFERENCES modems(id) ON DELETE SET NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_esim_cards_modem ON esim_cards(modem_id);
+
+-- esim_profiles：sticker eUICC 上的 profile 列表。
+-- iccid UNIQUE：同一 ICCID 只可能存在于一张卡上。
+-- state: enabled / disabled。
+CREATE TABLE IF NOT EXISTS esim_profiles (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    card_id           INTEGER NOT NULL,
+    iccid             TEXT NOT NULL UNIQUE,
+    isdp_aid          TEXT,
+    state             TEXT NOT NULL DEFAULT 'disabled', -- enabled / disabled
+    nickname          TEXT,                              -- eUICC 上的 nickname（写卡时同步）
+    service_provider  TEXT,
+    profile_name      TEXT,
+    profile_class     TEXT,                              -- operational / test / provisioning
+    last_refreshed_at TEXT,                              -- 最近一次 lpac profile list 时间
+    FOREIGN KEY (card_id) REFERENCES esim_cards(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_esim_profiles_card ON esim_profiles(card_id);
 
 CREATE TABLE IF NOT EXISTS sims (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,

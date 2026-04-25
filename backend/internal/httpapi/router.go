@@ -25,6 +25,7 @@ import (
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/audit"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/auth"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/config"
+	"github.com/KimmyXYC/ohmysmsapp/backend/internal/esim"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/modem"
 )
 
@@ -46,6 +47,7 @@ type Deps struct {
 	Store       *modem.Store
 	Auth        *auth.Service
 	Audit       *audit.Service // 审计日志服务；可为 nil（不记录）
+	ESIM        *esim.Service  // eSIM profile 切换服务；可为 nil（停用）
 
 	// WS handler（/ws 端点）；由 main.go 注入 hub.ServeHTTP
 	WSHandler http.Handler
@@ -93,6 +95,7 @@ func NewRouter(deps Deps) http.Handler {
 			registerSignal(pr, deps)
 			registerSettings(pr, deps)
 			registerAudit(pr, deps)
+			registerESIM(pr, deps)
 		})
 	})
 

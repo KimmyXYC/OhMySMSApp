@@ -53,8 +53,11 @@ type TelegramConfig struct {
 
 type ESIMConfig struct {
 	LPACBin             string            `yaml:"lpac_bin"`
+	LPACDriversDir      string            `yaml:"lpac_drivers_dir"`
 	InhibitModemManager bool              `yaml:"inhibit_modem_manager"`
 	AIDs                map[string]string `yaml:"aids"`
+	OperationTimeout    time.Duration     `yaml:"operation_timeout"` // lpac 单次执行超时
+	DiscoverCooldown    time.Duration     `yaml:"discover_cooldown"` // 同一 modem 自动发现冷却
 }
 
 type LoggingConfig struct {
@@ -85,9 +88,12 @@ func Default() Config {
 			PushSMS: true,
 		},
 		ESIM: ESIMConfig{
-			LPACBin:             "/usr/local/bin/lpac",
+			LPACBin:             "/opt/ohmysmsapp/bin/lpac",
+			LPACDriversDir:      "/opt/ohmysmsapp/bin/lpac-drivers",
 			InhibitModemManager: true,
 			AIDs:                map[string]string{},
+			OperationTimeout:    30 * time.Second,
+			DiscoverCooldown:    1 * time.Hour,
 		},
 		Logging: LoggingConfig{
 			Level:  "info",

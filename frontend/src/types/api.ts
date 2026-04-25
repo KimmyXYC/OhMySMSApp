@@ -271,14 +271,44 @@ export interface TelegramPutRequest {
 
 // ───────────── eSIM ─────────────
 
+/** ESimCard — 来自 GET /api/esim/cards */
 export interface ESimCard {
   id: number
-  eid: string | null
-  vendor: string | null
-  nickname: string | null
+  eid: string                        // 32 hex chars
+  vendor: string                     // "5ber" | "9esim" | "unknown"
+  vendor_display: string             // 例如 "5ber.eSIM"
+  nickname: string | null            // 用户自定义备注（存 DB）
   notes: string | null
+  euicc_firmware: string | null
+  profile_version: string | null
+  free_nvm: number | null            // bytes, eUICC 剩余空间
+  modem_id: number | null
+  modem_device_id: string | null
+  modem_model: string | null         // 当前承载 modem 的 model
+  transport: string | null           // "qmi" | "mbim" | null
+  active_iccid: string | null        // 当前激活 profile 的 ICCID
+  active_profile_name: string | null
+  last_seen_at: string | null
   created_at: string
-  profiles?: SimRow[]
+}
+
+/** ESimCardDetail — 来自 GET /api/esim/cards/{id} */
+export interface ESimCardDetail extends ESimCard {
+  profiles: ESimProfile[]
+}
+
+/** ESimProfile — 来自 GET /api/esim/cards/{id}/profiles */
+export interface ESimProfile {
+  id: number
+  card_id: number
+  iccid: string
+  isdp_aid: string
+  state: 'enabled' | 'disabled'
+  nickname: string | null            // 写入 eUICC 卡片
+  service_provider: string | null    // 运营商名
+  profile_name: string | null
+  profile_class: string | null       // "operational" / "test" / "provisioning"
+  last_refreshed_at: string
 }
 
 // ───────────── WebSocket ─────────────

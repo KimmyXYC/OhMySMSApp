@@ -51,6 +51,23 @@
   /* ─── 在线点 ─── */
   --ohmysms-online-dot: #60a5fa;
   --ohmysms-online-glow: rgba(96, 165, 250, 0.6);
+
+  /* ─── eSIM vendor 色板 ─── */
+  --ohmysms-vendor-5ber: #a78bfa;
+  --ohmysms-vendor-5ber-light: rgba(167, 139, 250, 0.12);
+  --ohmysms-vendor-5ber-bg: rgba(167, 139, 250, 0.08);
+  --ohmysms-vendor-9esim: #fb923c;
+  --ohmysms-vendor-9esim-light: rgba(251, 146, 60, 0.12);
+  --ohmysms-vendor-9esim-bg: rgba(251, 146, 60, 0.08);
+  --ohmysms-vendor-unknown: #94a3b8;
+  --ohmysms-vendor-unknown-light: rgba(148, 163, 184, 0.12);
+  --ohmysms-vendor-unknown-bg: rgba(148, 163, 184, 0.08);
+
+  /* ─── eSIM profile 状态 ─── */
+  --ohmysms-profile-enabled: #10b981;
+  --ohmysms-profile-enabled-bg: rgba(16, 185, 129, 0.1);
+  --ohmysms-profile-disabled: #94a3b8;
+  --ohmysms-profile-disabled-bg: rgba(148, 163, 184, 0.08);
 }
 
 /* ─── 深色模式 ─── */
@@ -82,6 +99,22 @@ html.dark {
 
   --ohmysms-online-dot: #7dd3fc;
   --ohmysms-online-glow: rgba(125, 211, 252, 0.5);
+
+  /* ─── eSIM vendor 色板 (dark) ─── */
+  --ohmysms-vendor-5ber: #c4b5fd;
+  --ohmysms-vendor-5ber-light: rgba(196, 181, 253, 0.15);
+  --ohmysms-vendor-5ber-bg: rgba(196, 181, 253, 0.08);
+  --ohmysms-vendor-9esim: #fdba74;
+  --ohmysms-vendor-9esim-light: rgba(253, 186, 116, 0.15);
+  --ohmysms-vendor-9esim-bg: rgba(253, 186, 116, 0.08);
+  --ohmysms-vendor-unknown: #94a3b8;
+  --ohmysms-vendor-unknown-light: rgba(148, 163, 184, 0.15);
+  --ohmysms-vendor-unknown-bg: rgba(148, 163, 184, 0.08);
+
+  --ohmysms-profile-enabled: #34d399;
+  --ohmysms-profile-enabled-bg: rgba(52, 211, 153, 0.12);
+  --ohmysms-profile-disabled: #64748b;
+  --ohmysms-profile-disabled-bg: rgba(100, 116, 139, 0.1);
 
   /* Element Plus dark mode overrides for light-blue tint */
   --el-bg-color: #1e293b;

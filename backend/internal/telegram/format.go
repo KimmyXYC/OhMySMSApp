@@ -398,6 +398,7 @@ func formatHelp() string {
 		"/recent [N] — 最近 N 条短信（默认 10）",
 		"/send — 发送短信（向导）",
 		"/ussd — 发起 USSD（向导）",
+		"/esim — 列出 eSIM 卡",
 		"/cancel — 取消当前向导",
 		"/help — 本帮助",
 	}

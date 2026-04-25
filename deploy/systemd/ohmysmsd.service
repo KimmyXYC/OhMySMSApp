@@ -23,7 +23,11 @@ StandardError=journal
 
 # 资源 & 安全
 LimitNOFILE=65536
-NoNewPrivileges=true
+# 注意：不能开 NoNewPrivileges=true。我们 fork 的 lpac 子进程依赖
+# LD_LIBRARY_PATH=/opt/ohmysmsapp/bin/lpac-drivers 来加载 driver_apdu_*.so，
+# 而 NoNewPrivileges 触发 ld.so 的 secure-execution 模式（AT_SECURE=1），
+# 在该模式下 LD_LIBRARY_PATH 被忽略，导致 lpac 报 "No APDU driver found"。
+# 如未来把 .so 装到 ld.so.cache 路径（/usr/local/lib/lpac + ldconfig），可以重新启用。
 ProtectSystem=strict
 ReadWritePaths=/opt/ohmysmsapp/data /opt/ohmysmsapp/web
 ProtectHome=true
