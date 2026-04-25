@@ -719,25 +719,27 @@ function isCardOperating(cardId: number): boolean {
                   @click="handleEditCardNickname(store.selectedCardDetail)"
                 />
               </div>
-              <el-button
-                type="primary"
-                plain
-                size="small"
-                :icon="Refresh"
-                @click="handleDiscoverCard(store.selectedCardDetail.id)"
-              >
-                重新扫描
-              </el-button>
-              <el-button
-                type="success"
-                plain
-                size="small"
-                :icon="Plus"
-                @click="handleOpenAddProfile"
-                :disabled="isCardOperating(store.selectedCardDetail.id)"
-              >
-                添加 Profile
-              </el-button>
+              <div class="esim-detail__card-actions">
+                <el-button
+                  type="primary"
+                  plain
+                  size="small"
+                  :icon="Refresh"
+                  @click="handleDiscoverCard(store.selectedCardDetail.id)"
+                >
+                  重新扫描
+                </el-button>
+                <el-button
+                  type="success"
+                  plain
+                  size="small"
+                  :icon="Plus"
+                  @click="handleOpenAddProfile"
+                  :disabled="isCardOperating(store.selectedCardDetail.id)"
+                >
+                  添加 Profile
+                </el-button>
+              </div>
             </div>
 
             <!-- Card 详细信息 -->
@@ -1260,6 +1262,13 @@ function isCardOperating(cardId: number): boolean {
     justify-content: space-between;
     margin-bottom: 20px;
     gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  &__card-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     flex-wrap: wrap;
   }
 
