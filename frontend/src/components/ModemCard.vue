@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
+import { Delete } from '@element-plus/icons-vue'
 import type { ModemRow } from '@/types/api'
 import { modemLabel } from '@/utils/modemLabel'
 import SignalBars from './SignalBars.vue'
@@ -8,6 +9,10 @@ import SimBadge from './SimBadge.vue'
 
 const props = defineProps<{
   modem: ModemRow
+}>()
+
+const emit = defineEmits<{
+  delete: [modem: ModemRow]
 }>()
 
 const router = useRouter()
@@ -22,6 +27,10 @@ const subtitle = computed(() => {
 
 function goDetail() {
   router.push({ name: 'modem-detail', params: { deviceId: props.modem.device_id } })
+}
+
+function handleDelete() {
+  emit('delete', props.modem)
 }
 </script>
 
@@ -60,6 +69,18 @@ function goDetail() {
     <!-- SIM 信息 -->
     <div v-if="modem.sim" style="margin-top: 12px">
       <SimBadge :sim="modem.sim" compact />
+    </div>
+
+    <div v-if="!modem.present" class="modem-card__actions">
+      <el-button
+        size="small"
+        type="danger"
+        text
+        :icon="Delete"
+        @click.stop="handleDelete"
+      >
+        删除离线模块
+      </el-button>
     </div>
   </el-card>
 </template>
@@ -124,6 +145,11 @@ function goDetail() {
     font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
     font-size: 12px;
     color: var(--el-text-color-regular);
+  }
+
+  &__actions {
+    margin-top: 12px;
+    text-align: right;
   }
 }
 </style>

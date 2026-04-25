@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { listSims } from '@/api/sims'
+import { listSims, deleteSim } from '@/api/sims'
 import type { SimRow } from '@/types/api'
 
 export const useSimsStore = defineStore('sims', () => {
@@ -36,6 +36,11 @@ export const useSimsStore = defineStore('sims', () => {
     }
   }
 
+  async function doDeleteSim(id: number) {
+    await deleteSim(id)
+    sims.value = sims.value.filter((s) => s.id !== id)
+  }
+
   return {
     sims,
     loading,
@@ -43,5 +48,6 @@ export const useSimsStore = defineStore('sims', () => {
     $reset,
     fetchSims,
     upsertSim,
+    doDeleteSim,
   }
 })

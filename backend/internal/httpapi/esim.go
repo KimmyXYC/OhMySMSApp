@@ -95,6 +95,48 @@ func registerESIM(r chi.Router, deps Deps) {
 		writeJSON(w, http.StatusOK, detail)
 	})
 
+	r.Post("/esim/cards/{id}/profiles", func(w http.ResponseWriter, req *http.Request) {
+		id, err := strconv.ParseInt(chi.URLParam(req, "id"), 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "invalid id")
+			return
+		}
+		var body struct {
+			ActivationCode   string `json:"activation_code"`
+			SMDPAddress      string `json:"smdp_address"`
+			MatchingID       string `json:"matching_id"`
+			ConfirmationCode string `json:"confirmation_code"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "invalid json body")
+			return
+		}
+		detail, payload, err := svc.AddProfile(req.Context(), id, esim.AddProfileRequest{
+			ActivationCode:   body.ActivationCode,
+			SMDPAddress:      body.SMDPAddress,
+			MatchingID:       body.MatchingID,
+			ConfirmationCode: body.ConfirmationCode,
+		})
+		actor := actorFromRequest(req)
+		entry := audit.Entry{
+			Actor:   actor,
+			Action:  "esim.profile.add",
+			Target:  chi.URLParam(req, "id"),
+			Payload: payload,
+		}
+		if err != nil {
+			entry.Result = "error"
+			entry.Err = err.Error()
+			logAudit(req.Context(), deps, entry)
+			writeESIMError(w, err)
+			return
+		}
+		entry.Target = detail.EID
+		entry.Result = "ok"
+		logAudit(req.Context(), deps, entry)
+		writeJSON(w, http.StatusCreated, detail)
+	})
+
 	r.Put("/esim/cards/{id}/nickname", func(w http.ResponseWriter, req *http.Request) {
 		id, err := strconv.ParseInt(chi.URLParam(req, "id"), 10, 64)
 		if err != nil {
@@ -216,6 +258,38 @@ func registerESIM(r chi.Router, deps Deps) {
 			"nickname": nickname,
 		})
 	})
+
+	r.Post("/esim/profiles/{iccid}/delete", func(w http.ResponseWriter, req *http.Request) {
+		iccid := chi.URLParam(req, "iccid")
+		var body struct {
+			ConfirmName string `json:"confirm_name"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "invalid json body")
+			return
+		}
+		payload, err := svc.DeleteProfile(req.Context(), iccid, strings.TrimSpace(body.ConfirmName))
+		actor := actorFromRequest(req)
+		entry := audit.Entry{
+			Actor:   actor,
+			Action:  "esim.profile.delete",
+			Target:  iccid,
+			Payload: payload,
+		}
+		if err != nil {
+			entry.Result = "error"
+			entry.Err = err.Error()
+			logAudit(req.Context(), deps, entry)
+			writeESIMError(w, err)
+			return
+		}
+		entry.Result = "ok"
+		logAudit(req.Context(), deps, entry)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"message": "profile deleted",
+			"iccid":   iccid,
+		})
+	})
 }
 
 // writeESIMError 把 esim.* 错误码映射到 HTTP 状态。
@@ -237,10 +311,24 @@ func writeESIMError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "modem_not_bound", err.Error())
 	case errors.Is(err, esim.ErrModemOffline):
 		writeError(w, http.StatusConflict, "modem_offline", err.Error())
+	case errors.Is(err, esim.ErrProfileActive):
+		writeError(w, http.StatusConflict, "profile_active", err.Error())
+	case errors.Is(err, esim.ErrInvalidProfileInput):
+		writeError(w, http.StatusBadRequest, "invalid_profile_input", err.Error())
 	case errors.Is(err, esim.ErrLPACError):
 		var lerr *esim.LPACError
 		if errors.As(err, &lerr) {
-			writeError(w, http.StatusInternalServerError, "lpac_error", lerr.Detail)
+			status := http.StatusInternalServerError
+			detail := strings.ToLower(lerr.Detail + " " + lerr.Stderr)
+			switch {
+			case strings.Contains(detail, "activation") || strings.Contains(detail, "confirmation") || strings.Contains(detail, "invalid") || strings.Contains(detail, "format"):
+				status = http.StatusBadRequest
+			case strings.Contains(detail, "already") || strings.Contains(detail, "not in disabled") || strings.Contains(detail, "insufficient") || strings.Contains(detail, "no space"):
+				status = http.StatusConflict
+			case strings.Contains(detail, "network") || strings.Contains(detail, "connect") || strings.Contains(detail, "timeout") || strings.Contains(detail, "smdp") || strings.Contains(detail, "server"):
+				status = http.StatusBadGateway
+			}
+			writeError(w, status, "lpac_error", lerr.Detail)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "lpac_error", err.Error())

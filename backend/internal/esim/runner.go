@@ -318,8 +318,8 @@ func parseProfileList(raw json.RawMessage) ([]profileEntry, error) {
 	return out, nil
 }
 
-// chipInfoCmd / profileListCmd / profileEnableCmd / profileDisableCmd /
-// profileNicknameCmd 返回 lpac CLI 参数。
+// chipInfoCmd / profileListCmd / profileDownloadCmd / profileEnableCmd /
+// profileDisableCmd / profileDeleteCmd / profileNicknameCmd 返回 lpac CLI 参数。
 //
 // 注意：lpac CLI 的 subcommand 形式（实测 5ber/9eSIM）：
 //
@@ -327,11 +327,27 @@ func parseProfileList(raw json.RawMessage) ([]profileEntry, error) {
 //	lpac profile list
 //	lpac profile enable <iccid>
 //	lpac profile disable <iccid>
+//	lpac profile delete <iccid>
 //	lpac profile nickname <iccid> <name>
-func chipInfoCmd() []string             { return []string{"chip", "info"} }
-func profileListCmd() []string          { return []string{"profile", "list"} }
+//	lpac profile download -a <LPA:...> [-c <confirmationCode>]
+//	lpac profile download -s <sm-dp+> -m <matchingId> [-c <confirmationCode>]
+func chipInfoCmd() []string    { return []string{"chip", "info"} }
+func profileListCmd() []string { return []string{"profile", "list"} }
+func profileDownloadCmd(activationCode, smdpAddress, matchingID, confirmationCode string) []string {
+	args := []string{"profile", "download"}
+	if activationCode != "" {
+		args = append(args, "-a", activationCode)
+	} else {
+		args = append(args, "-s", smdpAddress, "-m", matchingID)
+	}
+	if confirmationCode != "" {
+		args = append(args, "-c", confirmationCode)
+	}
+	return args
+}
 func profileEnableCmd(iccid string) []string  { return []string{"profile", "enable", iccid} }
 func profileDisableCmd(iccid string) []string { return []string{"profile", "disable", iccid} }
+func profileDeleteCmd(iccid string) []string  { return []string{"profile", "delete", iccid} }
 func profileNicknameCmd(iccid, nick string) []string {
 	return []string{"profile", "nickname", iccid, nick}
 }

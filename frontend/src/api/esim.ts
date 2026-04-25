@@ -2,6 +2,7 @@ import { getClient } from './client'
 import type {
   ESimCard,
   ESimCardDetail,
+  ESimAddProfileRequest,
   ESimProfile,
   ListResponse,
 } from '@/types/api'
@@ -28,6 +29,11 @@ export function discoverCard(cardId: number) {
   return getClient().post<{ message: string }>(`/esim/cards/${cardId}/discover`)
 }
 
+/** 添加/下载 profile 到卡片 */
+export function addProfile(cardId: number, payload: ESimAddProfileRequest) {
+  return getClient().post<ESimCardDetail>(`/esim/cards/${cardId}/profiles`, payload)
+}
+
 /** 修改卡备注名（存 DB） */
 export function setCardNickname(cardId: number, nickname: string) {
   return getClient().put<ESimCard>(`/esim/cards/${cardId}/nickname`, { nickname })
@@ -43,6 +49,13 @@ export function enableProfile(iccid: string) {
 /** 禁用 profile（后端 202，异步生效） */
 export function disableProfile(iccid: string) {
   return getClient().post<{ message: string }>(`/esim/profiles/${encodeURIComponent(iccid)}/disable`)
+}
+
+/** 删除 disabled profile（需带配置名称二次确认） */
+export function deleteProfile(iccid: string, confirmName: string) {
+  return getClient().post<{ message: string }>(`/esim/profiles/${encodeURIComponent(iccid)}/delete`, {
+    confirm_name: confirmName,
+  })
 }
 
 /** 修改 profile 昵称（写入 eUICC 卡片） */

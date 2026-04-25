@@ -5,12 +5,14 @@ import {
   getCard,
   listCardProfiles,
   discoverCard,
+  addProfile,
   setCardNickname,
   enableProfile,
   disableProfile,
+  deleteProfile,
   setProfileNickname,
 } from '@/api/esim'
-import type { ESimCard, ESimCardDetail, ESimProfile } from '@/types/api'
+import type { ESimAddProfileRequest, ESimCard, ESimCardDetail, ESimProfile } from '@/types/api'
 
 export const useESimStore = defineStore('esim', () => {
   // ─── State ───
@@ -102,6 +104,18 @@ export const useESimStore = defineStore('esim', () => {
     await discoverCard(cardId)
   }
 
+  async function doAddProfile(cardId: number, payload: ESimAddProfileRequest) {
+    const { data } = await addProfile(cardId, payload)
+    selectedCardDetail.value = data
+    profiles.value = data.profiles ?? []
+    const idx = cards.value.findIndex((c) => c.id === cardId)
+    if (idx >= 0) {
+      const { profiles: _p, ...cardFields } = data
+      cards.value[idx] = { ...cards.value[idx], ...cardFields }
+    }
+    return data
+  }
+
   async function doSetCardNickname(cardId: number, nickname: string) {
     const { data } = await setCardNickname(cardId, nickname)
     // 更新本地
@@ -123,6 +137,14 @@ export const useESimStore = defineStore('esim', () => {
     await disableProfile(iccid)
   }
 
+  async function doDeleteProfile(iccid: string, confirmName: string) {
+    await deleteProfile(iccid, confirmName)
+    profiles.value = profiles.value.filter((p) => p.iccid !== iccid)
+    if (selectedCardId.value !== null) {
+      await fetchCardDetail(selectedCardId.value)
+    }
+  }
+
   async function doSetProfileNickname(iccid: string, nickname: string) {
     const { data } = await setProfileNickname(iccid, nickname)
     // 更新本地
@@ -140,8 +162,8 @@ export const useESimStore = defineStore('esim', () => {
   async function pollUntilProfileChange(
     cardId: number,
     targetIccid: string | null,
-    timeoutMs = 30_000,
-    intervalMs = 2_000,
+    timeoutMs = 60_000,
+    intervalMs = 5_000,
   ): Promise<boolean> {
     const start = Date.now()
     while (Date.now() - start < timeoutMs) {
@@ -164,8 +186,11 @@ export const useESimStore = defineStore('esim', () => {
           // enable: active_iccid === targetIccid
           if (data.active_iccid === targetIccid) return true
         }
-      } catch {
-        // poll 失败忽略，继续
+      } catch (e: any) {
+        const code = e?.response?.data?.code
+        if (code && code !== 'modem_offline') {
+          // 非瞬时离线错误也先忽略，让轮询继续等待恢复
+        }
       }
     }
     return false
@@ -191,9 +216,11 @@ export const useESimStore = defineStore('esim', () => {
     fetchProfiles,
     selectCard,
     doDiscover,
+    doAddProfile,
     doSetCardNickname,
     doEnableProfile,
     doDisableProfile,
+    doDeleteProfile,
     doSetProfileNickname,
     pollUntilProfileChange,
   }

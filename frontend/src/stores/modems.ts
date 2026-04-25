@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { listModems, getModem } from '@/api/modems'
+import { listModems, getModem, deleteModem } from '@/api/modems'
 import type { ModemRow, ModemState, SignalSample } from '@/types/api'
 
 export const useModemsStore = defineStore('modems', () => {
@@ -42,6 +42,11 @@ export const useModemsStore = defineStore('modems', () => {
     return data
   }
 
+  async function doDeleteModem(deviceId: string) {
+    await deleteModem(deviceId)
+    modems.value = modems.value.filter((m) => m.device_id !== deviceId)
+  }
+
   /** WS modem.added / modem.updated → 用 ModemState 快照更新本地列表 */
   function handleModemState(state: ModemState) {
     const idx = modems.value.findIndex((m) => m.device_id === state.device_id)
@@ -55,6 +60,12 @@ export const useModemsStore = defineStore('modems', () => {
       m.primary_port = state.primary_port || m.primary_port
       m.usb_path = state.usb_path || m.usb_path
       m.present = true
+      if (!state.has_sim || state.sim === null) {
+        m.sim = null
+      } else if (state.sim && (!m.sim || m.sim.iccid !== state.sim.iccid)) {
+        // WS 的 SimState 不含 DB row id/esim 关联等完整字段；ICCID 变化时拉一次完整行。
+        fetchModems()
+      }
       // 信号
       if (m.signal) {
         m.signal.quality_pct = state.signal_quality
@@ -87,6 +98,7 @@ export const useModemsStore = defineStore('modems', () => {
     const idx = modems.value.findIndex((m) => m.device_id === deviceId)
     if (idx >= 0) {
       modems.value[idx].present = false
+      modems.value[idx].sim = null
     }
   }
 
@@ -122,6 +134,7 @@ export const useModemsStore = defineStore('modems', () => {
     $reset,
     fetchModems,
     fetchModem,
+    doDeleteModem,
     handleModemState,
     handleModemRemoved,
     handleSignalSample,

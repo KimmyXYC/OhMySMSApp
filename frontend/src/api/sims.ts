@@ -10,3 +10,8 @@ export function listSims() {
 export function getSim(id: number) {
   return getClient().get<SimRow>(`/sims/${id}`)
 }
+
+/** 删除未使用 SIM */
+export function deleteSim(id: number) {
+  return getClient().delete<{ message: string }>(`/sims/${id}`)
+}

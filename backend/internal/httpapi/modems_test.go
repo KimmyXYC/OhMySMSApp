@@ -34,6 +34,11 @@ func (w *resetProviderWrap) ResetModem(ctx context.Context, deviceID string) err
 }
 
 func setupWithProvider(t *testing.T, provider modem.Provider) (*httptest.Server, string) {
+	srv, tok, _ := setupWithProviderAndStore(t, provider)
+	return srv, tok
+}
+
+func setupWithProviderAndStore(t *testing.T, provider modem.Provider) (*httptest.Server, string, *modem.Store) {
 	t.Helper()
 	tmp := t.TempDir()
 	dbPath := filepath.Join(tmp, "m.db")
@@ -69,7 +74,7 @@ func setupWithProvider(t *testing.T, provider modem.Provider) (*httptest.Server,
 	})
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	return srv, tok
+	return srv, tok, store
 }
 
 const mockDev = "mock-device-quectel-0001"
@@ -237,5 +242,37 @@ func TestModemNickname_NotFound(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestDeleteOfflineModemAPI(t *testing.T) {
+	provider := modem.NewMockProvider(nil)
+	srv, tok, store := setupWithProviderAndStore(t, provider)
+	ctx := context.Background()
+
+	// 在线 mock 模块不能删除。
+	req, _ := http.NewRequest(http.MethodDelete, srv.URL+"/api/modems/"+mockDev, nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 for online modem, got %d", resp.StatusCode)
+	}
+
+	if err := store.MarkModemAbsent(ctx, mockDev); err != nil {
+		t.Fatal(err)
+	}
+	req2, _ := http.NewRequest(http.MethodDelete, srv.URL+"/api/modems/"+mockDev, nil)
+	req2.Header.Set("Authorization", "Bearer "+tok)
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 deleting offline modem, got %d", resp2.StatusCode)
 	}
 }

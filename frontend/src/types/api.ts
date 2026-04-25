@@ -311,6 +311,13 @@ export interface ESimProfile {
   last_refreshed_at: string
 }
 
+export interface ESimAddProfileRequest {
+  activation_code?: string
+  smdp_address?: string
+  matching_id?: string
+  confirmation_code?: string
+}
+
 // ───────────── WebSocket ─────────────
 
 /** WS 消息信封 (server → client) */

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useSimsStore } from '@/stores/sims'
 import { useModemsStore } from '@/stores/modems'
 import type { SimRow, ModemRow } from '@/types/api'
@@ -55,6 +56,43 @@ function goToSms(sim: SimRow) {
 
 function goToModem(modem: ModemRow) {
   router.push({ name: 'modem-detail', params: { deviceId: modem.device_id } })
+}
+
+function isSimInUse(sim: SimRow): boolean {
+  return !!findModem(sim)
+}
+
+async function handleDeleteSim(sim: SimRow) {
+  if (isSimInUse(sim)) {
+    ElMessage.warning('正在使用的 SIM 卡不能删除')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确定删除未使用的 SIM「${sim.iccid}」？短信记录会保留，但会解除与该 SIM 的关联。`,
+      '删除 SIM 卡',
+      {
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        type: 'warning',
+        confirmButtonClass: 'el-button--danger',
+      },
+    )
+  } catch {
+    return
+  }
+  try {
+    await simsStore.doDeleteSim(sim.id)
+    ElMessage.success('SIM 卡已删除')
+  } catch (e: any) {
+    const code = e.response?.data?.code
+    if (code === 'sim_in_use') {
+      ElMessage.error('该 SIM 当前仍绑定在模块上，不能删除')
+      await Promise.all([simsStore.fetchSims(), modemsStore.fetchModems()])
+    } else {
+      ElMessage.error(e.response?.data?.error || e.message || '删除 SIM 失败')
+    }
+  }
 }
 
 onMounted(async () => {
@@ -121,6 +159,15 @@ onMounted(async () => {
               <el-button size="small" type="primary" text @click="goToSms(sim)">
                 查看短信
               </el-button>
+              <el-button
+                size="small"
+                type="danger"
+                text
+                :disabled="isSimInUse(sim)"
+                @click="handleDeleteSim(sim)"
+              >
+                删除
+              </el-button>
             </div>
           </el-card>
         </el-col>
@@ -170,10 +217,19 @@ onMounted(async () => {
             <span v-else>—</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="100" fixed="right">
+        <el-table-column label="操作" width="150" fixed="right">
           <template #default="{ row }">
             <el-button size="small" text type="primary" @click="goToSms(row)">
               短信
+            </el-button>
+            <el-button
+              size="small"
+              text
+              type="danger"
+              :disabled="isSimInUse(row)"
+              @click="handleDeleteSim(row)"
+            >
+              删除
             </el-button>
           </template>
         </el-table-column>

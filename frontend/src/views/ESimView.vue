@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox, ElLoading } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Refresh,
   Search,
   CopyDocument,
   Edit,
-  CircleCheckFilled,
+  Plus,
+  Delete,
+  Camera,
 } from '@element-plus/icons-vue'
 import { useESimStore } from '@/stores/esim'
 import type { ESimCard, ESimProfile } from '@/types/api'
@@ -23,6 +25,19 @@ const nicknameDialogValue = ref('')
 const nicknameDialogHint = ref('')
 const nicknameDialogLoading = ref(false)
 let nicknameDialogCallback: ((val: string) => Promise<void>) | null = null
+
+// ─── 添加 Profile 弹窗 ───
+const addDialogVisible = ref(false)
+const addMode = ref<'activation' | 'manual' | 'qr'>('activation')
+const addActivationCode = ref('')
+const addSMDPAddress = ref('')
+const addMatchingID = ref('')
+const addConfirmationCode = ref('')
+const addDialogLoading = ref(false)
+const qrVideoRef = ref<HTMLVideoElement | null>(null)
+const qrScanning = ref(false)
+let qrStream: MediaStream | null = null
+let qrStop = false
 
 // ─── 初始化 ───
 onMounted(async () => {
@@ -49,6 +64,7 @@ watch(
 // ─── 清理 ───
 onUnmounted(() => {
   // 保留 store 状态，不 reset
+  stopQrScan()
 })
 
 // ─── 移动端视图控制 ───
@@ -106,6 +122,10 @@ function eidShort(eid: string): string {
 // ─── ICCID 格式化 ───
 function iccidShort(iccid: string): string {
   return iccid ? '...' + iccid.slice(-8) : '—'
+}
+
+function profileDisplayName(profile: ESimProfile): string {
+  return profile.nickname || profile.service_provider || profile.profile_name || profile.iccid
 }
 
 // ─── NVM 格式化 ───
@@ -177,6 +197,129 @@ async function handleDiscoverCard(cardId: number) {
     ElMessage.error(msg)
   }
 }
+
+function handleOpenAddProfile() {
+  if (!store.selectedCardDetail) return
+  addMode.value = 'activation'
+  addActivationCode.value = ''
+  addSMDPAddress.value = ''
+  addMatchingID.value = ''
+  addConfirmationCode.value = ''
+  addDialogVisible.value = true
+}
+
+async function handleAddDialogClosed() {
+  stopQrScan()
+  addConfirmationCode.value = ''
+}
+
+async function handleAddProfile() {
+  const card = store.selectedCardDetail
+  if (!card) return
+  const activationCode = addActivationCode.value.trim()
+  const smdp = addSMDPAddress.value.trim()
+  const matching = addMatchingID.value.trim()
+  const confirmation = addConfirmationCode.value.trim()
+  if (addMode.value === 'activation' || addMode.value === 'qr') {
+    if (!activationCode) {
+      ElMessage.warning('请输入或扫描 LPA 激活码')
+      return
+    }
+  } else if (!smdp || !matching) {
+    ElMessage.warning('请填写 SM-DP+ 地址和 Matching ID')
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      '将通过 lpac 下载并安装 profile 到当前 eUICC。请确保使用测试 9eSIM 卡，安装过程不要拔出设备。',
+      '添加 eSIM Profile',
+      { confirmButtonText: '开始添加', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+
+  addDialogLoading.value = true
+  store.operatingCardId = card.id
+  store.operatingText = '正在添加 profile...'
+  try {
+    await store.doAddProfile(card.id, addMode.value === 'manual'
+      ? { smdp_address: smdp, matching_id: matching, confirmation_code: confirmation || undefined }
+      : { activation_code: activationCode, confirmation_code: confirmation || undefined })
+    ElMessage.success('Profile 已添加')
+    addDialogVisible.value = false
+    await store.fetchCards()
+  } catch (e: any) {
+    const msg = e.response?.data?.error || e.message || '添加 profile 失败'
+    ElMessage.error(msg)
+  } finally {
+    addDialogLoading.value = false
+    store.operatingCardId = null
+    store.operatingText = ''
+  }
+}
+
+async function startQrScan() {
+  if (qrScanning.value) return
+  const BarcodeDetectorCtor = (window as any).BarcodeDetector
+  if (!BarcodeDetectorCtor) {
+    ElMessage.warning('当前浏览器不支持 BarcodeDetector，请手动粘贴二维码内容')
+    addMode.value = 'activation'
+    return
+  }
+  try {
+    qrStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+    await nextTick()
+    if (!qrVideoRef.value) return
+    qrVideoRef.value.srcObject = qrStream
+    await qrVideoRef.value.play()
+    qrScanning.value = true
+    qrStop = false
+    const detector = new BarcodeDetectorCtor({ formats: ['qr_code'] })
+    const loop = async () => {
+      if (qrStop || !qrVideoRef.value) return
+      try {
+        const codes = await detector.detect(qrVideoRef.value)
+        const raw = codes?.[0]?.rawValue?.trim()
+        if (raw) {
+          addActivationCode.value = raw
+          ElMessage.success('已扫描二维码')
+          addMode.value = 'activation'
+          stopQrScan()
+          return
+        }
+      } catch {
+        // ignore single frame detection errors
+      }
+      requestAnimationFrame(loop)
+    }
+    requestAnimationFrame(loop)
+  } catch (e: any) {
+    ElMessage.error(e?.message || '无法打开摄像头')
+    addMode.value = 'activation'
+  }
+}
+
+function stopQrScan() {
+  qrStop = true
+  qrScanning.value = false
+  if (qrStream) {
+    qrStream.getTracks().forEach((t) => t.stop())
+    qrStream = null
+  }
+  if (qrVideoRef.value) {
+    qrVideoRef.value.srcObject = null
+  }
+}
+
+watch(addMode, async (mode) => {
+  if (mode === 'qr') {
+    await startQrScan()
+  } else {
+    stopQrScan()
+  }
+})
 
 // ─── 编辑卡备注名 ───
 function handleEditCardNickname(card: ESimCard) {
@@ -328,6 +471,55 @@ async function handleDisableProfile(profile: ESimProfile) {
       await store.fetchCardDetail(store.selectedCardId)
     }
   }
+}
+
+async function handleDeleteProfile(profile: ESimProfile) {
+  const card = store.selectedCardDetail
+  if (!card) return
+  if (profile.state === 'enabled') {
+    ElMessage.warning('请先禁用该 profile，再删除')
+    return
+  }
+  const name = profileDisplayName(profile)
+  try {
+    await ElMessageBox.prompt(
+      `删除后无法恢复。请输入配置名称「${name}」确认删除。`,
+      '删除 Profile',
+      {
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+        inputPattern: new RegExp(`^${escapeRegExp(name)}$`),
+        inputErrorMessage: '输入的配置名称不匹配',
+        type: 'warning',
+        confirmButtonClass: 'el-button--danger',
+      },
+    )
+  } catch {
+    return
+  }
+
+  store.operatingCardId = card.id
+  store.operatingText = '正在删除 profile...'
+  try {
+    await store.doDeleteProfile(profile.iccid, name)
+    ElMessage.success('Profile 已删除')
+    await store.fetchCards()
+  } catch (e: any) {
+    const code = e.response?.data?.code
+    if (code === 'profile_active') {
+      ElMessage.error('该 profile 仍处于启用状态，请先禁用')
+    } else {
+      const msg = e.response?.data?.error || e.message || '删除 profile 失败'
+      ElMessage.error(msg)
+    }
+  } finally {
+    store.operatingCardId = null
+    store.operatingText = ''
+  }
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 // ─── 是否当前卡正在操作 ───
@@ -536,6 +728,16 @@ function isCardOperating(cardId: number): boolean {
               >
                 重新扫描
               </el-button>
+              <el-button
+                type="success"
+                plain
+                size="small"
+                :icon="Plus"
+                @click="handleOpenAddProfile"
+                :disabled="isCardOperating(store.selectedCardDetail.id)"
+              >
+                添加 Profile
+              </el-button>
             </div>
 
             <!-- Card 详细信息 -->
@@ -600,14 +802,19 @@ function isCardOperating(cardId: number): boolean {
 
             <div v-if="store.profiles.length === 0" class="esim-detail__no-profiles">
               <p style="color: var(--el-text-color-secondary)">暂无 profile 数据</p>
-              <el-button
-                type="primary"
-                plain
-                size="small"
-                @click="handleDiscoverCard(store.selectedCardDetail!.id)"
-              >
-                扫描发现 profile
-              </el-button>
+              <div class="esim-detail__empty-actions">
+                <el-button
+                  type="primary"
+                  plain
+                  size="small"
+                  @click="handleDiscoverCard(store.selectedCardDetail!.id)"
+                >
+                  扫描发现 profile
+                </el-button>
+                <el-button type="success" plain size="small" :icon="Plus" @click="handleOpenAddProfile">
+                  添加 Profile
+                </el-button>
+              </div>
             </div>
 
             <div v-else class="esim-profiles">
@@ -702,6 +909,16 @@ function isCardOperating(cardId: number): boolean {
                   >
                     昵称
                   </el-button>
+                  <el-button
+                    text
+                    type="danger"
+                    size="small"
+                    :icon="Delete"
+                    @click="handleDeleteProfile(profile)"
+                    :disabled="isCardOperating(store.selectedCardId!) || profile.state === 'enabled'"
+                  >
+                    删除
+                  </el-button>
                 </div>
               </div>
             </div>
@@ -741,6 +958,67 @@ function isCardOperating(cardId: number): boolean {
           :loading="nicknameDialogLoading"
         >
           保存
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 添加 Profile 弹窗 -->
+    <el-dialog
+      v-model="addDialogVisible"
+      title="添加 eSIM Profile"
+      width="560px"
+      :close-on-click-modal="false"
+      @closed="handleAddDialogClosed"
+    >
+      <el-alert
+        title="可粘贴 LPA 二维码内容，或手动填写 SM-DP+ / Matching ID。"
+        type="info"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 16px"
+      />
+      <el-radio-group v-model="addMode" style="margin-bottom: 16px">
+        <el-radio-button label="activation">LPA 激活码</el-radio-button>
+        <el-radio-button label="manual">手动信息</el-radio-button>
+        <el-radio-button label="qr">扫描二维码</el-radio-button>
+      </el-radio-group>
+
+      <div v-if="addMode === 'activation'" class="esim-add-form">
+        <el-input
+          v-model="addActivationCode"
+          type="textarea"
+          :rows="3"
+          placeholder="LPA:1$<SM-DP+ 地址>$<Matching ID>"
+        />
+      </div>
+      <div v-else-if="addMode === 'manual'" class="esim-add-form">
+        <el-input v-model="addSMDPAddress" placeholder="SM-DP+ 地址" />
+        <el-input v-model="addMatchingID" placeholder="Matching ID / Activation Code" />
+      </div>
+      <div v-else class="esim-add-form">
+        <video ref="qrVideoRef" class="esim-add-form__video" muted playsinline />
+        <div class="esim-add-form__qr-actions">
+          <el-button :icon="Camera" @click="startQrScan" :loading="qrScanning">重新打开摄像头</el-button>
+          <el-button @click="stopQrScan">停止扫描</el-button>
+        </div>
+        <el-input
+          v-model="addActivationCode"
+          type="textarea"
+          :rows="2"
+          placeholder="扫描后会自动填入，也可手动粘贴"
+        />
+      </div>
+      <el-input
+        v-model="addConfirmationCode"
+        placeholder="Confirmation Code（如运营商要求，可选）"
+        show-password
+        clearable
+        style="margin-top: 12px"
+      />
+      <template #footer>
+        <el-button @click="addDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="handleAddProfile" :loading="addDialogLoading">
+          添加
         </el-button>
       </template>
     </el-dialog>
@@ -1046,6 +1324,32 @@ function isCardOperating(cardId: number): boolean {
     gap: 12px;
     padding: 32px 0;
     text-align: center;
+  }
+
+  &__empty-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+}
+
+.esim-add-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+
+  &__video {
+    width: 100%;
+    min-height: 260px;
+    background: #000;
+    border-radius: 8px;
+    object-fit: cover;
+  }
+
+  &__qr-actions {
+    display: flex;
+    gap: 8px;
   }
 }
 

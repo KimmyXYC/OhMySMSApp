@@ -71,7 +71,7 @@ func (f *fakeCommander) run(_ context.Context, _ string, args []string, env []st
 		data = f.chipData
 	case "profile list":
 		data = f.listData
-	case "profile enable", "profile disable", "profile nickname":
+	case "profile enable", "profile disable", "profile nickname", "profile download", "profile delete":
 		data = json.RawMessage(`null`)
 	default:
 		return nil, nil, 1, errors.New("unknown subcommand")
@@ -94,6 +94,29 @@ type fakeInhibitor struct {
 	inhibits []string
 	releases []string
 	failOn   map[string]bool
+}
+
+type resetProvider struct {
+	deviceIDs []string
+}
+
+func (p *resetProvider) Start(context.Context) error               { return nil }
+func (p *resetProvider) Events() <-chan modem.Event                { return nil }
+func (p *resetProvider) ListModems() []modem.ModemState            { return nil }
+func (p *resetProvider) GetModem(string) (modem.ModemState, bool)  { return modem.ModemState{}, false }
+func (p *resetProvider) ListSMS(string) ([]modem.SMSRecord, error) { return nil, nil }
+func (p *resetProvider) SendSMS(context.Context, string, string, string) (string, error) {
+	return "", nil
+}
+func (p *resetProvider) DeleteSMS(context.Context, string, string) error { return nil }
+func (p *resetProvider) InitiateUSSD(context.Context, string, string) (string, string, error) {
+	return "", "", nil
+}
+func (p *resetProvider) RespondUSSD(context.Context, string, string) (string, error) { return "", nil }
+func (p *resetProvider) CancelUSSD(context.Context, string) error                    { return nil }
+func (p *resetProvider) ResetModem(_ context.Context, deviceID string) error {
+	p.deviceIDs = append(p.deviceIDs, deviceID)
+	return nil
 }
 
 func (f *fakeInhibitor) inhibit(_ context.Context, uid string) error {
@@ -224,6 +247,7 @@ func newTestService(t *testing.T) (*Service, *fakeCommander, *sql.DB, *modem.Sto
 	svc.inhibitOverrideInhibit = fi.inhibit
 	svc.inhibitOverrideUninhibit = fi.uninhibit
 	svc.postToggleDelay = 0
+	svc.modemResetDelay = 0
 	t.Cleanup(func() { svc.Stop() })
 
 	return svc, fc, conn, store, modemID
@@ -285,6 +309,124 @@ func TestDisableThenEnable_HappyPath(t *testing.T) {
 	}
 	if payload2["prev_state"] != "disabled" {
 		t.Errorf("expected prev_state=disabled, got %v", payload2["prev_state"])
+	}
+}
+
+func TestToggleProfile_RequestsModemReset(t *testing.T) {
+	svc, fc, _, _, modemID := newTestService(t)
+	rp := &resetProvider{}
+	svc.provider = rp
+	ctx := context.Background()
+	if err := svc.runDiscoverOnModem(ctx, modemID); err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	fc.toggleHook = func(args []string) {
+		if len(args) >= 2 && args[0] == "profile" && args[1] == "disable" {
+			fc.listData = json.RawMessage(`[
+				{"iccid":"894921007608614852","profileState":"disabled",
+				 "serviceProviderName":"o2-de","profileName":"o2-de"}
+			]`)
+		}
+	}
+	payload, err := svc.DisableProfile(ctx, "894921007608614852")
+	if err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if payload["modem_refresh"] != "reset_requested" {
+		t.Fatalf("expected reset_requested payload, got %+v", payload)
+	}
+	if len(rp.deviceIDs) != 1 || rp.deviceIDs[0] != "dev_test_modem_1" {
+		t.Fatalf("expected reset for dev_test_modem_1, got %+v", rp.deviceIDs)
+	}
+}
+
+func TestEnableProfile_DisablesCurrentBeforeTarget(t *testing.T) {
+	svc, fc, _, _, modemID := newTestService(t)
+	ctx := context.Background()
+	fc.listData = json.RawMessage(`[
+		{"iccid":"894921007608614852","isdpAid":"A0000005591010FFFFFFFF8900001000","profileState":"enabled",
+		 "serviceProviderName":"o2-de","profileName":"o2-de"},
+		{"iccid":"8931440400000000001","isdpAid":"A0000005591010FFFFFFFF8900001100","profileState":"disabled",
+		 "serviceProviderName":"BetterRoaming","profileName":"BetterRoaming"}
+	]`)
+	if err := svc.runDiscoverOnModem(ctx, modemID); err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	fc.toggleHook = func(args []string) {
+		if len(args) >= 3 && args[0] == "profile" && args[1] == "disable" && args[2] == "A0000005591010FFFFFFFF8900001000" {
+			fc.listData = json.RawMessage(`[
+				{"iccid":"894921007608614852","isdpAid":"A0000005591010FFFFFFFF8900001000","profileState":"disabled",
+				 "serviceProviderName":"o2-de","profileName":"o2-de"},
+				{"iccid":"8931440400000000001","isdpAid":"A0000005591010FFFFFFFF8900001100","profileState":"disabled",
+				 "serviceProviderName":"BetterRoaming","profileName":"BetterRoaming"}
+			]`)
+		}
+		if len(args) >= 3 && args[0] == "profile" && args[1] == "enable" && args[2] == "A0000005591010FFFFFFFF8900001100" {
+			fc.listData = json.RawMessage(`[
+				{"iccid":"894921007608614852","isdpAid":"A0000005591010FFFFFFFF8900001000","profileState":"disabled",
+				 "serviceProviderName":"o2-de","profileName":"o2-de"},
+				{"iccid":"8931440400000000001","isdpAid":"A0000005591010FFFFFFFF8900001100","profileState":"enabled",
+				 "serviceProviderName":"BetterRoaming","profileName":"BetterRoaming"}
+			]`)
+		}
+	}
+	payload, err := svc.EnableProfile(ctx, "8931440400000000001")
+	if err != nil {
+		t.Fatalf("enable target: %v", err)
+	}
+	if payload["previous_enabled_iccid"] != "894921007608614852" {
+		t.Fatalf("expected previous enabled in payload, got %+v", payload)
+	}
+
+	var sawDisable, sawEnable bool
+	for _, c := range fc.calls {
+		if len(c.Args) >= 3 && c.Args[0] == "profile" && c.Args[1] == "disable" && c.Args[2] == "A0000005591010FFFFFFFF8900001000" {
+			sawDisable = true
+		}
+		if len(c.Args) >= 3 && c.Args[0] == "profile" && c.Args[1] == "enable" && c.Args[2] == "A0000005591010FFFFFFFF8900001100" {
+			sawEnable = true
+		}
+	}
+	if !sawDisable || !sawEnable {
+		t.Fatalf("expected disable current then enable target, sawDisable=%v sawEnable=%v calls=%+v", sawDisable, sawEnable, fc.calls)
+	}
+}
+
+func TestGetCardRefreshesProfilesFromChip(t *testing.T) {
+	svc, fc, _, _, modemID := newTestService(t)
+	ctx := context.Background()
+	if err := svc.runDiscoverOnModem(ctx, modemID); err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	if _, err := svc.db.ExecContext(ctx, `UPDATE esim_profiles SET last_refreshed_at = ? WHERE card_id = 1`, "2000-01-01T00:00:00Z"); err != nil {
+		t.Fatalf("force stale cache: %v", err)
+	}
+	fc.mu.Lock()
+	before := len(fc.calls)
+	fc.mu.Unlock()
+	fc.listData = json.RawMessage(`[
+		{"iccid":"894921007608614852","profileState":"disabled",
+		 "serviceProviderName":"o2-de","profileName":"o2-de"},
+		{"iccid":"8931440400000000001","profileState":"enabled",
+		 "serviceProviderName":"BetterRoaming","profileName":"BetterRoaming"}
+	]`)
+	detail, err := svc.GetCard(ctx, 1)
+	if err != nil {
+		t.Fatalf("get card: %v", err)
+	}
+	if detail.ActiveICCID == nil || *detail.ActiveICCID != "8931440400000000001" {
+		t.Fatalf("expected active ICCID from fresh chip list, got %+v", detail.ActiveICCID)
+	}
+	foundList := false
+	fc.mu.Lock()
+	for _, c := range fc.calls[before:] {
+		if len(c.Args) >= 2 && c.Args[0] == "profile" && c.Args[1] == "list" {
+			foundList = true
+		}
+	}
+	fc.mu.Unlock()
+	if !foundList {
+		t.Fatalf("expected GetCard to run profile list")
 	}
 }
 
@@ -367,6 +509,74 @@ func TestEnableProfile_InhibitFails(t *testing.T) {
 		t.Fatalf("expected ErrInhibitFailed, got %v", err)
 	}
 	_ = fc
+}
+
+func TestAddProfile_WithActivationCode(t *testing.T) {
+	svc, fc, _, _, modemID := newTestService(t)
+	ctx := context.Background()
+	if err := svc.runDiscoverOnModem(ctx, modemID); err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	fc.toggleHook = func(args []string) {
+		if len(args) >= 2 && args[0] == "profile" && args[1] == "download" {
+			fc.listData = json.RawMessage(`[
+				{"iccid":"894921007608614852","profileState":"enabled","serviceProviderName":"o2-de","profileName":"o2-de"},
+				{"iccid":"8931440400000000001","profileState":"disabled","serviceProviderName":"BetterRoaming","profileName":"BetterRoaming"}
+			]`)
+		}
+	}
+	detail, payload, err := svc.AddProfile(ctx, 1, AddProfileRequest{
+		ActivationCode: "LPA:1$rsp.truphone.com$QRF-BETTERROAMING-PMRDGIR2EARDEIT5",
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if payload["method"] != "activation_code" {
+		t.Fatalf("payload method mismatch: %+v", payload)
+	}
+	if len(detail.Profiles) != 2 {
+		t.Fatalf("expected 2 profiles, got %d", len(detail.Profiles))
+	}
+	foundDownload := false
+	for _, c := range fc.calls {
+		if len(c.Args) >= 4 && c.Args[0] == "profile" && c.Args[1] == "download" && c.Args[2] == "-a" {
+			foundDownload = true
+		}
+	}
+	if !foundDownload {
+		t.Fatalf("expected profile download -a call, calls=%+v", fc.calls)
+	}
+}
+
+func TestDeleteProfile_DisabledOnly(t *testing.T) {
+	svc, fc, _, _, modemID := newTestService(t)
+	ctx := context.Background()
+	fc.listData = json.RawMessage(`[
+		{"iccid":"894921007608614852","profileState":"enabled","serviceProviderName":"o2-de","profileName":"o2-de"},
+		{"iccid":"8931440400000000001","profileState":"disabled","serviceProviderName":"BetterRoaming","profileName":"BetterRoaming"}
+	]`)
+	if err := svc.runDiscoverOnModem(ctx, modemID); err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	if _, err := svc.DeleteProfile(ctx, "894921007608614852", "o2-de"); !errors.Is(err, ErrProfileActive) {
+		t.Fatalf("expected ErrProfileActive, got %v", err)
+	}
+	if _, err := svc.DeleteProfile(ctx, "8931440400000000001", "wrong name"); !errors.Is(err, ErrInvalidProfileInput) {
+		t.Fatalf("expected ErrInvalidProfileInput, got %v", err)
+	}
+	fc.toggleHook = func(args []string) {
+		if len(args) >= 2 && args[0] == "profile" && args[1] == "delete" {
+			fc.listData = json.RawMessage(`[
+				{"iccid":"894921007608614852","profileState":"enabled","serviceProviderName":"o2-de","profileName":"o2-de"}
+			]`)
+		}
+	}
+	if _, err := svc.DeleteProfile(ctx, "8931440400000000001", "BetterRoaming"); err != nil {
+		t.Fatalf("delete disabled: %v", err)
+	}
+	if _, err := svc.profileByICCID(ctx, "8931440400000000001"); !errors.Is(err, ErrProfileNotFound) {
+		t.Fatalf("expected deleted profile not found, got %v", err)
+	}
 }
 
 func TestParseChipInfo(t *testing.T) {

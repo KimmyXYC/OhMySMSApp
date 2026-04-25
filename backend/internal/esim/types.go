@@ -38,6 +38,10 @@ var (
 	ErrModemNotBound = errors.New("esim card is not bound to any modem")
 	// ErrModemOffline modem 不在线 → 409。
 	ErrModemOffline = errors.New("modem currently offline")
+	// ErrProfileActive profile 正在启用，删除前需先禁用 → 409。
+	ErrProfileActive = errors.New("profile is enabled; disable it before deleting")
+	// ErrInvalidProfileInput 添加/删除 profile 的请求参数无效 → 400。
+	ErrInvalidProfileInput = errors.New("invalid profile input")
 )
 
 // LPACError 携带 lpac 退出原因，方便上层日志/审计。

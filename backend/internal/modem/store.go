@@ -206,6 +206,54 @@ func (s *Store) UnbindModem(ctx context.Context, modemID int64) error {
 	return err
 }
 
+// DeleteOfflineModem 物理删除一条离线 modem 记录。在线 modem 不允许删除。
+// 外键语义：信号历史级联删除；短信/USSD 的 modem_id 置空；eSIM card modem_id 置空。
+func (s *Store) DeleteOfflineModem(ctx context.Context, deviceID string) error {
+	var present int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT present FROM modems WHERE device_id = ?`, deviceID).Scan(&present); err != nil {
+		return err
+	}
+	if present != 0 {
+		return ErrModemInUse
+	}
+	res, err := s.db.ExecContext(ctx, `DELETE FROM modems WHERE device_id = ? AND present = 0`, deviceID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// DeleteUnusedSIM 物理删除一条当前未绑定任何 modem 的 SIM 记录。
+// 删除后短信/USSD/信号历史中的 sim_id 会按外键置空。
+func (s *Store) DeleteUnusedSIM(ctx context.Context, simID int64) error {
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM sims WHERE id = ?`, simID).Scan(&exists); err != nil {
+		return err
+	}
+	var bindings int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM modem_sim_bindings WHERE sim_id = ?`, simID).Scan(&bindings); err != nil {
+		return err
+	}
+	if bindings > 0 {
+		return ErrSIMInUse
+	}
+	res, err := s.db.ExecContext(ctx, `DELETE FROM sims WHERE id = ?`, simID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 // UpsertSim upsert SIM 行，并同步更新 modem ↔ sim 绑定。返回 sim.id。
 //
 // 只有存在真实 ICCID 才入库。空 ICCID 直接返回 (0, nil) —— 不再用
@@ -278,6 +326,20 @@ ON CONFLICT(modem_id) DO UPDATE SET
 			return simID, fmt.Errorf("bind modem sim: %w", err)
 		}
 	}
+	// 如果该 ICCID 已被 eSIM 子系统发现为某个 profile，则把 modem 刚读到的 SIM 行
+	// 反向关联回 esim_cards/esim_profiles。切换 profile 后 MM 重新读卡时，SimType
+	// 往往仍是 unknown/psim，不能只依赖 provider 给出的类型。
+	_, _ = s.db.ExecContext(ctx, `
+UPDATE sims
+SET esim_card_id = (SELECT card_id FROM esim_profiles WHERE iccid = sims.iccid),
+    esim_profile_active = CASE
+        WHEN (SELECT state FROM esim_profiles WHERE iccid = sims.iccid) = 'enabled' THEN 1
+        ELSE 0
+    END,
+    esim_profile_nickname = (SELECT nickname FROM esim_profiles WHERE iccid = sims.iccid),
+    card_type = 'sticker_esim'
+WHERE iccid = ?
+  AND EXISTS (SELECT 1 FROM esim_profiles WHERE iccid = sims.iccid)`, iccid)
 	return simID, nil
 }
 

@@ -2,6 +2,8 @@ package modem
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"testing"
 
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/db"
@@ -19,6 +21,59 @@ func newTestStore(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 	return NewStore(conn)
+}
+
+func TestDeleteOfflineModem_OnlyOffline(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	id, err := s.UpsertModem(ctx, ModemState{DeviceID: "dev-delete", IMEI: "123456789012345"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteOfflineModem(ctx, "dev-delete"); !errors.Is(err, ErrModemInUse) {
+		t.Fatalf("expected ErrModemInUse, got %v", err)
+	}
+	if err := s.MarkModemAbsent(ctx, "dev-delete"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteOfflineModem(ctx, "dev-delete"); err != nil {
+		t.Fatalf("delete offline modem: %v", err)
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM modems WHERE id = ?`, id).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("expected modem deleted, count=%d", n)
+	}
+	if err := s.DeleteOfflineModem(ctx, "dev-delete"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected sql.ErrNoRows, got %v", err)
+	}
+}
+
+func TestDeleteUnusedSIM_OnlyUnbound(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	modemID, err := s.UpsertModem(ctx, ModemState{DeviceID: "dev-sim-delete", IMEI: "223456789012345"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	simID, err := s.UpsertSim(ctx, SimState{ICCID: "8986000000000000001"}, modemID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteUnusedSIM(ctx, simID); !errors.Is(err, ErrSIMInUse) {
+		t.Fatalf("expected ErrSIMInUse, got %v", err)
+	}
+	if err := s.UnbindModem(ctx, modemID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteUnusedSIM(ctx, simID); err != nil {
+		t.Fatalf("delete unused sim: %v", err)
+	}
+	if _, err := s.GetSIMByID(ctx, simID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected deleted sim not found, got %v", err)
+	}
 }
 
 // TestUpsertModem_IMEIStableAcrossDeviceIDChange 验证核心修复：

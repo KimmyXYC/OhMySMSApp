@@ -27,17 +27,17 @@ type MMProvider struct {
 
 	mu      sync.RWMutex
 	conn    *dbus.Conn
-	modems  map[string]*modemEntry // key = DeviceID
-	byPath  map[dbus.ObjectPath]string // DBus path → DeviceID（反查）
+	modems  map[string]*modemEntry                 // key = DeviceID
+	byPath  map[dbus.ObjectPath]string             // DBus path → DeviceID（反查）
 	smsSubs map[dbus.ObjectPath][]dbus.MatchOption // 每个 SMS path 对应的 match options（用于 RemoveMatchSignal）
 }
 
 // modemEntry 是一个 modem 的运行时完整状态。
 type modemEntry struct {
-	State        ModemState
-	SIMPath      dbus.ObjectPath
-	USSDSession  *USSDState               // 当前 USSD 会话，nil 表示无
-	SMSPaths     map[dbus.ObjectPath]bool // 当前已订阅的 SMS 对象
+	State       ModemState
+	SIMPath     dbus.ObjectPath
+	USSDSession *USSDState               // 当前 USSD 会话，nil 表示无
+	SMSPaths    map[dbus.ObjectPath]bool // 当前已订阅的 SMS 对象
 	// 注册到 DBus 的 match options 副本，关闭时同参数 Remove。
 	matches []dbus.MatchOption
 }
@@ -637,17 +637,15 @@ func (p *MMProvider) onPropertiesChanged(ctx context.Context, path dbus.ObjectPa
 			newPath, _ := sp.Value().(dbus.ObjectPath)
 			switch {
 			case newPath == "" || newPath == "/":
-				// SIM 被拔出：清空内存 SIM 快照并 emit update。
-				// DB 层的 modem↔sim 绑定清理由 runner.go 在收到
-				// EventModemUpdated 且 state.SIM == nil 时处理。
-				p.mu.Lock()
-				entry.State.SIM = nil
-				entry.State.HasSim = false
-				entry.SIMPath = ""
-				p.mu.Unlock()
+				p.clearEntrySIM(entry)
 				p.log.Info("sim removed", "device", deviceID)
 			default:
 				if sim, err := p.readSim(conn, newPath); err == nil {
+					if sim.ICCID == "" {
+						p.clearEntrySIM(entry)
+						p.log.Info("sim removed (empty SimIdentifier)", "device", deviceID, "path", newPath)
+						break
+					}
 					p.mu.Lock()
 					entry.State.SIM = &sim
 					entry.State.HasSim = true
@@ -659,6 +657,10 @@ func (p *MMProvider) onPropertiesChanged(ctx context.Context, path dbus.ObjectPa
 					})
 				}
 			}
+		}
+		if entry.State.FailedReason == "sim-missing" || entry.State.FailedReason == "sim-error" {
+			p.clearEntrySIM(entry)
+			p.log.Info("sim removed", "device", deviceID, "reason", entry.State.FailedReason)
 		}
 		p.emit(Event{Kind: EventModemUpdated, DeviceID: deviceID, Payload: entry.State, At: time.Now()})
 
@@ -703,14 +705,28 @@ func (p *MMProvider) onPropertiesChanged(ctx context.Context, path dbus.ObjectPa
 		p.mu.RUnlock()
 		if conn != nil && simPath != "" && simPath != "/" {
 			if sim, err := p.readSim(conn, simPath); err == nil {
+				if sim.ICCID == "" {
+					p.clearEntrySIM(entry)
+					p.emit(Event{Kind: EventModemUpdated, DeviceID: deviceID, Payload: entry.State, At: time.Now()})
+					return
+				}
 				p.mu.Lock()
 				entry.State.SIM = &sim
+				entry.State.HasSim = true
 				p.mu.Unlock()
 				p.emit(Event{Kind: EventSimUpdated, DeviceID: deviceID, Payload: sim, At: time.Now()})
 			}
 		}
 	}
 	_ = ctx
+}
+
+func (p *MMProvider) clearEntrySIM(entry *modemEntry) {
+	p.mu.Lock()
+	entry.State.SIM = nil
+	entry.State.HasSim = false
+	entry.SIMPath = ""
+	p.mu.Unlock()
 }
 
 // applyModemProps 合并 Modem 接口的常见属性变化到内存快照。

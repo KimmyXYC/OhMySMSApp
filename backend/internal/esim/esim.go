@@ -15,6 +15,10 @@ import (
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/modem"
 )
 
+const profileCacheTTL = 15 * time.Second
+const modemRecoveryTimeout = 15 * time.Second
+const modemRecoveryPoll = 500 * time.Millisecond
+
 // Service 是 esim 子系统的对外门面。
 //
 // 职责：
@@ -22,15 +26,15 @@ import (
 //   - 通过 lpac + ModemManager InhibitDevice 完成 enable/disable/nickname 操作
 //   - 订阅 modem.Runner 事件，对 newly registered 的 modem 自动跑一次 chip info
 //
-// 不做：profile 下载、删除（风险高，留给后续）。
+// profile 下载、删除等写操作均需 inhibit MM 并串行化，避免 APDU 通道抢占。
 type Service struct {
-	cfg     config.ESIMConfig
-	db      *sql.DB
-	store   *modem.Store
+	cfg      config.ESIMConfig
+	db       *sql.DB
+	store    *modem.Store
 	provider modem.Provider
-	runner  *modem.Runner
-	audit   *audit.Service
-	log     *slog.Logger
+	runner   *modem.Runner
+	audit    *audit.Service
+	log      *slog.Logger
 
 	lpac    *lpacRunner
 	inhibit *inhibitor
@@ -43,6 +47,9 @@ type Service struct {
 	// postToggleDelay 在 enable/disable 之后 sleep 让 eUICC 应用变更。
 	// 默认 2s；测试可置 0。
 	postToggleDelay time.Duration
+	// modemResetDelay 在 uninhibit 后等待 MM 重新接管 modem，再请求 Reset。
+	// 默认 3s；测试可置 0。
+	modemResetDelay time.Duration
 
 	// 进程内串行：同一 modem 不允许并发跑 lpac，避免抢占同一 cdc-wdm。
 	modemLockMu sync.Mutex
@@ -78,6 +85,7 @@ func New(cfg config.ESIMConfig, db *sql.DB, store *modem.Store, provider modem.P
 		modemLocks:       make(map[int64]*sync.Mutex),
 		discoverLastSeen: make(map[int64]time.Time),
 		postToggleDelay:  2 * time.Second,
+		modemResetDelay:  3 * time.Second,
 	}
 }
 
@@ -155,6 +163,20 @@ func (s *Service) ListCards(ctx context.Context) ([]ESimCard, error) {
 
 // GetCard 查一张 card 详情（含 profiles）。
 func (s *Service) GetCard(ctx context.Context, id int64) (*ESimCardDetail, error) {
+	if s.profilesFresh(ctx, id, profileCacheTTL) {
+		return s.getCardCached(ctx, id)
+	}
+	if err := s.refreshCardProfilesFromChip(ctx, id); err != nil {
+		if detail, derr := s.getCardCached(ctx, id); derr == nil && len(detail.Profiles) > 0 {
+			return detail, nil
+		}
+		return nil, err
+	}
+	return s.getCardCached(ctx, id)
+}
+
+// getCardCached 只读 DB 缓存，不触发 lpac。内部用于 Discover 等已经刷新过芯片的路径。
+func (s *Service) getCardCached(ctx context.Context, id int64) (*ESimCardDetail, error) {
 	cards, err := s.queryCards(ctx, id)
 	if err != nil {
 		return nil, err
@@ -174,8 +196,14 @@ func (s *Service) GetCard(ctx context.Context, id int64) (*ESimCardDetail, error
 
 // ListProfiles 列出某 card 的 profile。
 func (s *Service) ListProfiles(ctx context.Context, cardID int64) ([]ESimProfile, error) {
-	if _, err := s.cardByID(ctx, cardID); err != nil {
-		return nil, err
+	if !s.profilesFresh(ctx, cardID, profileCacheTTL) {
+		if err := s.refreshCardProfilesFromChip(ctx, cardID); err != nil {
+			profiles, qerr := s.queryProfiles(ctx, cardID)
+			if qerr == nil && len(profiles) > 0 {
+				return profiles, nil
+			}
+			return nil, err
+		}
 	}
 	return s.queryProfiles(ctx, cardID)
 }
@@ -232,7 +260,7 @@ func (s *Service) Discover(ctx context.Context, cardID int64) (*ESimCardDetail, 
 	if err := s.runDiscoverOnModem(ctx, modemID); err != nil {
 		return nil, err
 	}
-	return s.GetCard(ctx, cardID)
+	return s.getCardCached(ctx, cardID)
 }
 
 // EnableProfile 启用某 profile（按 ICCID）。
@@ -243,6 +271,138 @@ func (s *Service) EnableProfile(ctx context.Context, iccid string) (auditPayload
 // DisableProfile 禁用 profile。
 func (s *Service) DisableProfile(ctx context.Context, iccid string) (auditPayload map[string]any, err error) {
 	return s.toggleProfile(ctx, iccid, false)
+}
+
+// AddProfileRequest 描述一次 eSIM profile 下载/安装请求。
+// 可直接传 QR 内容（ActivationCode，如 LPA:1$...），也可手动传 SM-DP+ 与 Matching ID。
+type AddProfileRequest struct {
+	ActivationCode   string
+	SMDPAddress      string
+	MatchingID       string
+	ConfirmationCode string
+}
+
+// AddProfile 下载/安装一个 profile 到指定 eUICC card。
+func (s *Service) AddProfile(ctx context.Context, cardID int64, req AddProfileRequest) (*ESimCardDetail, map[string]any, error) {
+	if !s.lpac.available() {
+		return nil, nil, ErrLPACUnavailable
+	}
+	req.ActivationCode = strings.TrimSpace(req.ActivationCode)
+	req.SMDPAddress = strings.TrimSpace(req.SMDPAddress)
+	req.MatchingID = strings.TrimSpace(req.MatchingID)
+	req.ConfirmationCode = strings.TrimSpace(req.ConfirmationCode)
+	if req.ActivationCode == "" && (req.SMDPAddress == "" || req.MatchingID == "") {
+		return nil, nil, fmt.Errorf("%w: provide activation_code or smdp_address + matching_id", ErrInvalidProfileInput)
+	}
+	card, modemRow, t, err := s.lookupCardAndModem(ctx, cardID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := s.runProfileWrite(ctx, *card.ModemID, strDeref(modemRow.USBPath), t,
+		profileDownloadCmd(req.ActivationCode, req.SMDPAddress, req.MatchingID, req.ConfirmationCode),
+		nil,
+		func() error {
+			if data, e := s.lpac.runJSON(ctx, t, chipInfoCmd()); e == nil {
+				if ci, perr := parseChipInfo(data); perr == nil {
+					_, _ = s.upsertCard(ctx, ci.EID, ci, *card.ModemID)
+				}
+			}
+			data, e := s.lpac.runJSON(ctx, t, profileListCmd())
+			if e != nil {
+				return e
+			}
+			entries, perr := parseProfileList(data)
+			if perr != nil {
+				return perr
+			}
+			s.upsertProfiles(ctx, card.ID, entries)
+			return nil
+		},
+	); err != nil {
+		return nil, nil, err
+	}
+	detail, err := s.GetCard(ctx, card.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	payload := map[string]any{
+		"eid":             card.EID,
+		"card_id":         card.ID,
+		"modem_device_id": modemRow.DeviceID,
+		"transport":       t.Kind,
+		"method":          "manual",
+	}
+	if req.ActivationCode != "" {
+		payload["method"] = "activation_code"
+		payload["activation_code_len"] = len(req.ActivationCode)
+	} else {
+		payload["smdp_address"] = req.SMDPAddress
+	}
+	return detail, payload, nil
+}
+
+// DeleteProfile 删除一个 disabled profile。enabled profile 必须先禁用，避免误删当前可用配置。
+func (s *Service) DeleteProfile(ctx context.Context, iccid, confirmName string) (map[string]any, error) {
+	if !s.lpac.available() {
+		return nil, ErrLPACUnavailable
+	}
+	prof, card, modemRow, t, err := s.lookupProfileAndModem(ctx, iccid)
+	if err != nil {
+		return nil, err
+	}
+	profileName := profileDisplayName(prof)
+	if strings.TrimSpace(confirmName) != profileName {
+		return nil, fmt.Errorf("%w: confirmation name does not match", ErrInvalidProfileInput)
+	}
+	if prof.State == ProfileStateEnabled {
+		return nil, ErrProfileActive
+	}
+	if err := s.runProfileWrite(ctx, *card.ModemID, strDeref(modemRow.USBPath), t,
+		profileDeleteCmd(iccid),
+		func() error {
+			fresh, ferr := s.profileByICCID(ctx, iccid)
+			if ferr != nil {
+				return ferr
+			}
+			if fresh.State == ProfileStateEnabled {
+				return ErrProfileActive
+			}
+			return nil
+		},
+		func() error {
+			if _, err := s.db.ExecContext(ctx, `DELETE FROM esim_profiles WHERE iccid = ?`, iccid); err != nil {
+				return err
+			}
+			if _, err := s.db.ExecContext(ctx, `
+UPDATE sims
+SET esim_card_id = NULL,
+    esim_profile_active = 0,
+    esim_profile_nickname = NULL,
+    card_type = 'psim'
+WHERE iccid = ?`, iccid); err != nil {
+				return err
+			}
+			if data, e := s.lpac.runJSON(ctx, t, profileListCmd()); e == nil {
+				if entries, perr := parseProfileList(data); perr == nil {
+					s.upsertProfiles(ctx, card.ID, entries)
+				}
+			} else {
+				s.log.Warn("post-delete profile list refresh failed", "iccid", iccid, "err", e)
+			}
+			return nil
+		},
+	); err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"eid":              card.EID,
+		"iccid":            iccid,
+		"modem_device_id":  modemRow.DeviceID,
+		"transport":        t.Kind,
+		"profile_name":     derefStr(prof.ProfileName),
+		"service_provider": derefStr(prof.ServiceProvider),
+		"nickname":         derefStr(prof.Nickname),
+	}, nil
 }
 
 // SetProfileNickname 修改 profile 在 eUICC 上的 nickname（写卡）。
@@ -277,12 +437,12 @@ func (s *Service) SetProfileNickname(ctx context.Context, iccid, nickname string
 		nullable(nickname), nowRFC3339(), iccid)
 
 	payload := map[string]any{
-		"eid":              card.EID,
-		"iccid":            iccid,
-		"modem_device_id":  modemRow.DeviceID,
-		"transport":        t.Kind,
-		"prev_nickname":    derefStr(prof.Nickname),
-		"new_nickname":     nickname,
+		"eid":             card.EID,
+		"iccid":           iccid,
+		"modem_device_id": modemRow.DeviceID,
+		"transport":       t.Kind,
+		"prev_nickname":   derefStr(prof.Nickname),
+		"new_nickname":    nickname,
 	}
 	return payload, nil
 }
@@ -290,15 +450,8 @@ func (s *Service) SetProfileNickname(ctx context.Context, iccid, nickname string
 // ---------------- internal helpers ----------------
 
 // toggleProfile 是 enable/disable 的共同实现。enable=true 启用，false 禁用。
-//
-// 关键步骤（按顺序）：
-//  1. DB 查 profile + card + modem，校验状态
-//  2. 已经处于目标状态 → ErrNoChangeNeeded
-//  3. 拿 modem 锁，inhibit MM
-//  4. 跑 lpac，超时 30s
-//  5. uninhibit + sleep 2s 让 eUICC refresh
-//  6. 触发一次 profile list 同步 DB（不更新 modem_sim_bindings——MM 重新上线后
-//     runner 会自动更新）
+// 写操作必须以芯片 profile list 为准：进入锁和 inhibit 后先 fresh list；失败后也
+// 尽力 fresh list，避免把 DB 缓存当成真实芯片状态。
 func (s *Service) toggleProfile(ctx context.Context, iccid string, enable bool) (map[string]any, error) {
 	if !s.lpac.available() {
 		return nil, ErrLPACUnavailable
@@ -310,9 +463,6 @@ func (s *Service) toggleProfile(ctx context.Context, iccid string, enable bool) 
 	wantState := ProfileStateDisabled
 	if enable {
 		wantState = ProfileStateEnabled
-	}
-	if prof.State == wantState {
-		return nil, ErrNoChangeNeeded
 	}
 
 	lock := s.modemLock(*card.ModemID)
@@ -333,14 +483,57 @@ func (s *Service) toggleProfile(ctx context.Context, iccid string, enable bool) 
 		}
 	}()
 
-	var args []string
-	if enable {
-		args = profileEnableCmd(iccid)
-	} else {
-		args = profileDisableCmd(iccid)
+	entries, err := s.refreshProfilesLocked(ctx, card.ID, t)
+	if err != nil {
+		return nil, err
 	}
-	if _, lerr := s.lpac.runJSON(ctx, t, args); lerr != nil {
-		return nil, lerr
+	target, ok := findProfileEntry(entries, iccid)
+	if !ok {
+		return nil, ErrProfileNotFound
+	}
+	prevState := target.State
+	current, hasCurrent := enabledProfileEntry(entries)
+
+	if target.State == wantState {
+		return nil, ErrNoChangeNeeded
+	}
+
+	if enable && hasCurrent && current.ICCID != target.ICCID {
+		if _, lerr := s.lpac.runJSON(ctx, t, profileDisableCmd(profileOpID(current))); lerr != nil {
+			_, _ = s.refreshProfilesLocked(ctx, card.ID, t)
+			return nil, lerr
+		}
+		if s.postToggleDelay > 0 {
+			select {
+			case <-ctx.Done():
+			case <-time.After(s.postToggleDelay):
+			}
+		}
+		entries, err = s.refreshProfilesLocked(ctx, card.ID, t)
+		if err != nil {
+			return nil, err
+		}
+		if cur, stillEnabled := enabledProfileEntry(entries); stillEnabled && cur.ICCID == current.ICCID {
+			return nil, fmt.Errorf("%w: current profile %s could not be disabled", ErrLPACError, current.ICCID)
+		}
+	}
+
+	var opErr error
+	if enable {
+		_, opErr = s.lpac.runJSON(ctx, t, profileEnableCmd(profileOpID(target)))
+	} else {
+		_, opErr = s.lpac.runJSON(ctx, t, profileDisableCmd(profileOpID(target)))
+	}
+	if opErr != nil {
+		_, _ = s.refreshProfilesLocked(ctx, card.ID, t)
+		// 如果 switch 中已经禁用了原 current，但启用目标失败，尽力回滚到原 current。
+		if enable && hasCurrent && current.ICCID != target.ICCID {
+			if _, rerr := s.lpac.runJSON(ctx, t, profileEnableCmd(profileOpID(current))); rerr != nil {
+				s.log.Warn("rollback enable previous profile failed", "previous_iccid", current.ICCID, "err", rerr)
+			}
+			_, _ = s.refreshProfilesLocked(ctx, card.ID, t)
+		}
+		return nil, opErr
 	}
 
 	// 给 eUICC 一点时间应用变更
@@ -351,12 +544,7 @@ func (s *Service) toggleProfile(ctx context.Context, iccid string, enable bool) 
 		}
 	}
 
-	// 立刻重读 profile list 同步 DB
-	if data, e := s.lpac.runJSON(ctx, t, profileListCmd()); e == nil {
-		if entries, perr := parseProfileList(data); perr == nil {
-			s.upsertProfiles(ctx, card.ID, entries)
-		}
-	} else {
+	if _, e := s.refreshProfilesLocked(ctx, card.ID, t); e != nil {
 		s.log.Warn("post-toggle profile list refresh failed",
 			"iccid", iccid, "err", e)
 	}
@@ -364,17 +552,45 @@ func (s *Service) toggleProfile(ctx context.Context, iccid string, enable bool) 
 	// uninhibit 让 MM 重新上线 modem
 	if err := s.doUninhibit(ctx, uid); err == nil {
 		uninhibited = true
+	} else {
+		return nil, err
+	}
+	refreshStatus := "uninhibited"
+	var refreshErr string
+	if s.provider != nil {
+		if s.modemResetDelay > 0 {
+			select {
+			case <-ctx.Done():
+			case <-time.After(s.modemResetDelay):
+			}
+		}
+		if err := s.provider.ResetModem(ctx, modemRow.DeviceID); err != nil {
+			refreshStatus = "reset_failed"
+			refreshErr = err.Error()
+			s.log.Warn("post-toggle modem reset failed", "device_id", modemRow.DeviceID, "err", err)
+		} else {
+			refreshStatus = "reset_requested"
+		}
 	}
 
-	prevState := prof.State
 	payload := map[string]any{
 		"eid":             card.EID,
 		"iccid":           iccid,
 		"modem_device_id": modemRow.DeviceID,
 		"transport":       t.Kind,
+		"profile_aid":     target.ISDPAid,
 		"prev_state":      prevState,
 		"new_state":       wantState,
+		"modem_refresh":   refreshStatus,
 	}
+	if refreshErr != "" {
+		payload["modem_refresh_error"] = refreshErr
+	}
+	if enable && hasCurrent && current.ICCID != target.ICCID {
+		payload["previous_enabled_iccid"] = current.ICCID
+		payload["previous_enabled_aid"] = current.ISDPAid
+	}
+	_ = prof
 	return payload, nil
 }
 
@@ -410,6 +626,80 @@ func (s *Service) lookupProfileAndModem(ctx context.Context, iccid string) (
 		return ESimProfile{}, ESimCard{}, nil, transportInfo{}, ErrTransportUnsupported
 	}
 	return prof, card, mrow, t, nil
+}
+
+// lookupCardAndModem 查 card 并确认已绑定在线 modem。
+func (s *Service) lookupCardAndModem(ctx context.Context, cardID int64) (ESimCard, *modem.ModemRow, transportInfo, error) {
+	card, err := s.cardByID(ctx, cardID)
+	if err != nil {
+		return ESimCard{}, nil, transportInfo{}, err
+	}
+	if card.ModemID == nil {
+		return ESimCard{}, nil, transportInfo{}, ErrModemNotBound
+	}
+	mrow, err := s.store.GetModemByID(ctx, *card.ModemID)
+	if err != nil {
+		return ESimCard{}, nil, transportInfo{}, err
+	}
+	if mrow == nil || !mrow.Present {
+		if err := s.waitModemRecovery(ctx, *card.ModemID, modemRecoveryTimeout); err != nil {
+			return ESimCard{}, nil, transportInfo{}, ErrModemOffline
+		}
+		mrow, err = s.store.GetModemByID(ctx, *card.ModemID)
+		if err != nil {
+			return ESimCard{}, nil, transportInfo{}, err
+		}
+		if mrow == nil || !mrow.Present {
+			return ESimCard{}, nil, transportInfo{}, ErrModemOffline
+		}
+	}
+	t, ok := resolveTransport(mrow)
+	if !ok {
+		return ESimCard{}, nil, transportInfo{}, ErrTransportUnsupported
+	}
+	return card, mrow, t, nil
+}
+
+// runProfileWrite 串行执行一次会写 eUICC 的 lpac 命令，并在成功后执行 after。
+func (s *Service) runProfileWrite(ctx context.Context, modemID int64, uid string, t transportInfo, args []string, before func() error, after func() error) error {
+	if uid == "" {
+		return fmt.Errorf("%w: modem has no usb_path uid", ErrInhibitFailed)
+	}
+	lock := s.modemLock(modemID)
+	lock.Lock()
+	defer lock.Unlock()
+	if err := s.doInhibit(ctx, uid); err != nil {
+		return err
+	}
+	unInhibited := false
+	defer func() {
+		if !unInhibited {
+			_ = s.doUninhibit(context.Background(), uid)
+		}
+	}()
+	if before != nil {
+		if err := before(); err != nil {
+			return err
+		}
+	}
+	if _, err := s.lpac.runJSON(ctx, t, args); err != nil {
+		return err
+	}
+	if s.postToggleDelay > 0 {
+		select {
+		case <-ctx.Done():
+		case <-time.After(s.postToggleDelay):
+		}
+	}
+	if after != nil {
+		if err := after(); err != nil {
+			return err
+		}
+	}
+	if err := s.doUninhibit(ctx, uid); err == nil {
+		unInhibited = true
+	}
+	return nil
 }
 
 // findBearer 遍历当前在线 modem，跑 chip info，找到 EID 匹配的那个。
@@ -548,7 +838,12 @@ func (s *Service) runProfileListAndUpsert(ctx context.Context, cardID, modemID i
 	if err := s.doInhibit(ctx, uid); err != nil {
 		return err
 	}
-	defer func() { _ = s.doUninhibit(context.Background(), uid) }()
+	uninhibited := false
+	defer func() {
+		if !uninhibited {
+			_ = s.doUninhibit(context.Background(), uid)
+		}
+	}()
 
 	data, err := s.lpac.runJSON(ctx, t, profileListCmd())
 	if err != nil {
@@ -559,7 +854,109 @@ func (s *Service) runProfileListAndUpsert(ctx context.Context, cardID, modemID i
 		return err
 	}
 	s.upsertProfiles(ctx, cardID, entries)
-	return nil
+	if err := s.doUninhibit(ctx, uid); err != nil {
+		return err
+	}
+	uninhibited = true
+	return s.waitModemRecovery(ctx, modemID, modemRecoveryTimeout)
+}
+
+func (s *Service) refreshProfilesLocked(ctx context.Context, cardID int64, t transportInfo) ([]profileEntry, error) {
+	data, err := s.lpac.runJSON(ctx, t, profileListCmd())
+	if err != nil {
+		return nil, err
+	}
+	entries, err := parseProfileList(data)
+	if err != nil {
+		return nil, err
+	}
+	s.upsertProfiles(ctx, cardID, entries)
+	return entries, nil
+}
+
+func findProfileEntry(entries []profileEntry, iccid string) (profileEntry, bool) {
+	iccid = modem.NormalizeICCID(iccid)
+	for _, p := range entries {
+		if p.ICCID == iccid {
+			return p, true
+		}
+	}
+	return profileEntry{}, false
+}
+
+func enabledProfileEntry(entries []profileEntry) (profileEntry, bool) {
+	for _, p := range entries {
+		if p.State == ProfileStateEnabled {
+			return p, true
+		}
+	}
+	return profileEntry{}, false
+}
+
+func profileOpID(p profileEntry) string {
+	if p.ISDPAid != "" {
+		return p.ISDPAid
+	}
+	return p.ICCID
+}
+
+func (s *Service) profilesFresh(ctx context.Context, cardID int64, ttl time.Duration) bool {
+	if ttl <= 0 {
+		return false
+	}
+	var ts sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+SELECT MAX(last_refreshed_at)
+FROM esim_profiles
+WHERE card_id = ?`, cardID).Scan(&ts)
+	if err != nil || !ts.Valid || ts.String == "" {
+		return false
+	}
+	t, err := time.Parse(time.RFC3339, ts.String)
+	if err != nil {
+		return false
+	}
+	return time.Since(t) < ttl
+}
+
+func (s *Service) waitModemRecovery(ctx context.Context, modemID int64, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = modemRecoveryTimeout
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		mrow, err := s.store.GetModemByID(ctx, modemID)
+		if err == nil && mrow != nil && mrow.Present {
+			if _, ok := resolveTransport(mrow); ok {
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return ErrModemOffline
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(modemRecoveryPoll):
+		}
+	}
+}
+
+// refreshCardProfilesFromChip 强制从 eUICC 芯片读取 profile list，并把结果同步到 DB。
+// 这是对外 profile/详情接口的数据源，DB 只作为刚刷新后的查询/关联缓存。
+func (s *Service) refreshCardProfilesFromChip(ctx context.Context, cardID int64) error {
+	if !s.lpac.available() {
+		return ErrLPACUnavailable
+	}
+	card, mrow, t, err := s.lookupCardAndModem(ctx, cardID)
+	if err != nil {
+		return err
+	}
+	uid := strDeref(mrow.USBPath)
+	if uid == "" {
+		return fmt.Errorf("%w: modem has no usb_path uid", ErrInhibitFailed)
+	}
+	return s.runProfileListAndUpsert(ctx, card.ID, *card.ModemID, uid, t)
 }
 
 // upsertCard upsert 一条 esim_cards 行。
@@ -909,4 +1306,14 @@ func derefStr(p *string) string {
 		return ""
 	}
 	return *p
+}
+
+func profileDisplayName(p ESimProfile) string {
+	for _, v := range []string{derefStr(p.Nickname), derefStr(p.ServiceProvider), derefStr(p.ProfileName), p.ICCID} {
+		v = strings.TrimSpace(v)
+		if v != "" {
+			return v
+		}
+	}
+	return p.ICCID
 }

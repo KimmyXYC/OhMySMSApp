@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { onMounted, computed } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useModemsStore } from '@/stores/modems'
 import { useSimsStore } from '@/stores/sims'
 import ModemCard from '@/components/ModemCard.vue'
 import { Refresh } from '@element-plus/icons-vue'
+import type { ModemRow } from '@/types/api'
 
 const modemsStore = useModemsStore()
 const simsStore = useSimsStore()
@@ -17,6 +19,39 @@ onMounted(async () => {
 function handleRefresh() {
   modemsStore.fetchModems()
   simsStore.fetchSims()
+}
+
+async function handleDeleteModem(modem: ModemRow) {
+  if (modem.present) {
+    ElMessage.warning('在线模块不能删除')
+    return
+  }
+  const name = modem.nickname || modem.model || modem.device_id
+  try {
+    await ElMessageBox.confirm(
+      `确定删除离线模块「${name}」？短信记录会保留，但该模块的信号历史会一起删除。`,
+      '删除离线模块',
+      {
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        type: 'warning',
+        confirmButtonClass: 'el-button--danger',
+      },
+    )
+  } catch {
+    return
+  }
+  try {
+    await modemsStore.doDeleteModem(modem.device_id)
+    ElMessage.success('模块已删除')
+  } catch (e: any) {
+    const code = e.response?.data?.code
+    if (code === 'modem_in_use') {
+      ElMessage.error('模块当前在线，不能删除')
+    } else {
+      ElMessage.error(e.response?.data?.error || e.message || '删除模块失败')
+    }
+  }
 }
 </script>
 
@@ -81,7 +116,7 @@ function handleRefresh() {
           :lg="6"
           style="margin-bottom: 16px"
         >
-          <ModemCard :modem="modem" />
+          <ModemCard :modem="modem" @delete="handleDeleteModem" />
         </el-col>
       </el-row>
 

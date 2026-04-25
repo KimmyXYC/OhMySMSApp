@@ -7,7 +7,15 @@
 //   - 事件通过单一 channel 扇出给下游（WS hub / Telegram / DB 写入 Runner）
 package modem
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+var (
+	ErrModemInUse = errors.New("modem is online and cannot be deleted")
+	ErrSIMInUse   = errors.New("sim is currently in use and cannot be deleted")
+)
 
 // EventKind 事件类型枚举。
 type EventKind string
@@ -84,12 +92,12 @@ type ModemState struct {
 	FailedReason string         `json:"failed_reason"` // sim-missing / sim-error / ...
 	PowerState   string         `json:"power_state"`   // off / low / on / unknown
 
-	AccessTech    []string `json:"access_tech"` // 解码后的技术列表，例如 ["lte"]
+	AccessTech    []string `json:"access_tech"`    // 解码后的技术列表，例如 ["lte"]
 	SignalQuality int      `json:"signal_quality"` // 0-100
 	SignalRecent  bool     `json:"signal_recent"`
 
-	Registration string   `json:"registration"`   // home / roaming / searching / denied / unknown / ...
-	OperatorID   string   `json:"operator_id"`    // MCCMNC
+	Registration string   `json:"registration"` // home / roaming / searching / denied / unknown / ...
+	OperatorID   string   `json:"operator_id"`  // MCCMNC
 	OperatorName string   `json:"operator_name"`
 	OwnNumbers   []string `json:"own_numbers"`
 

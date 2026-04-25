@@ -41,6 +41,30 @@ func registerModems(r chi.Router, deps Deps) {
 		writeJSON(w, http.StatusOK, m)
 	})
 
+	r.Delete("/modems/{device_id}", func(w http.ResponseWriter, req *http.Request) {
+		dev := chi.URLParam(req, "device_id")
+		err := deps.Store.DeleteOfflineModem(req.Context(), dev)
+		actor := actorFromRequest(req)
+		entry := audit.Entry{Actor: actor, Action: "modem.delete", Target: dev}
+		if err != nil {
+			entry.Result = "error"
+			entry.Err = err.Error()
+			logAudit(req.Context(), deps, entry)
+			switch {
+			case errors.Is(err, sql.ErrNoRows):
+				writeError(w, http.StatusNotFound, "not_found", "modem not found")
+			case errors.Is(err, modem.ErrModemInUse):
+				writeError(w, http.StatusConflict, "modem_in_use", err.Error())
+			default:
+				writeError(w, http.StatusInternalServerError, "db_error", err.Error())
+			}
+			return
+		}
+		entry.Result = "ok"
+		logAudit(req.Context(), deps, entry)
+		writeJSON(w, http.StatusOK, map[string]string{"message": "modem deleted"})
+	})
+
 	// POST /modems/{device_id}/reset —— 异步软复位 modem。
 	//  202 + {"message":"reset requested"} 成功提交
 	//  501 + {"error":"modem reset not supported","code":"reset_unsupported"} 插件/固件不支持
