@@ -895,9 +895,11 @@ func (p *MMProvider) readSim(conn *dbus.Conn, path dbus.ObjectPath) (SimState, e
 	if err != nil {
 		return SimState{}, err
 	}
+	// MM 的 SimIdentifier 直接来自 EF_ICCID，常带末尾 'F' padding（19 位 ICCID 占 20 nibble）。
+	// 全链路统一去掉 padding，确保和 lpac 输出的 ICCID 能匹配（见 NormalizeICCID 注释）。
 	sim := SimState{
 		DBusPath:         string(path),
-		ICCID:            getString(props, "SimIdentifier"),
+		ICCID:            NormalizeICCID(getString(props, "SimIdentifier")),
 		IMSI:             getString(props, "Imsi"),
 		EID:              getString(props, "Eid"),
 		OperatorID:       getString(props, "OperatorIdentifier"),

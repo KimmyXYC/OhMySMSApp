@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/KimmyXYC/ohmysmsapp/backend/internal/modem"
 )
 
 // lpacRunner 把对 lpac 二进制的 exec 与 JSON 解析包成一个对象。
@@ -291,6 +293,9 @@ func parseProfileList(raw json.RawMessage) ([]profileEntry, error) {
 			return ""
 		}
 		p.ICCID = readStr("iccid", "ICCID")
+		// lpac 输出的 ICCID 通常已经是无 padding 的标准形式，但保险起见统一走
+		// modem.NormalizeICCID（同时去首尾空白），保证和 sims.iccid 一致。
+		p.ICCID = modem.NormalizeICCID(p.ICCID)
 		p.ISDPAid = readStr("isdpAid", "isdp_aid", "isdpAID")
 		st := strings.ToLower(readStr("profileState", "state"))
 		switch st {

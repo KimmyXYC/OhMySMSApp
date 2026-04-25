@@ -215,7 +215,12 @@ func (s *Store) UpsertSim(ctx context.Context, sim SimState, modemID int64) (int
 	if sim.ICCID == "" {
 		return 0, nil
 	}
-	iccid := sim.ICCID
+	// 防御：万一调用方没规范化，这里再处理一次。把所有写入归一为无 padding 形式，
+	// 否则会和 esim_profiles.iccid（lpac 输出已是无 padding）对不上。
+	iccid := NormalizeICCID(sim.ICCID)
+	if iccid == "" {
+		return 0, nil
+	}
 
 	cardType := "psim"
 	if strings.EqualFold(sim.SimType, "esim") {
@@ -234,7 +239,13 @@ ON CONFLICT(iccid) DO UPDATE SET
     msisdn        = CASE WHEN excluded.msisdn IS NOT NULL AND excluded.msisdn <> '' THEN excluded.msisdn ELSE sims.msisdn END,
     operator_id   = CASE WHEN excluded.operator_id <> '' THEN excluded.operator_id ELSE sims.operator_id END,
     operator_name = CASE WHEN excluded.operator_name <> '' THEN excluded.operator_name ELSE sims.operator_name END,
-    card_type     = excluded.card_type,
+    -- 只把现存的 'psim' 升级为 excluded 提供的更具体类型；不要把 esim 服务已经识别出来的
+    -- 'sticker_esim'/'embedded_esim' 覆盖回去（modem provider 拿到的 SimState.SimType 在
+    -- 大多数模块上都是 unknown，会被解码成 psim，不能信任）。
+    card_type     = CASE
+        WHEN sims.card_type IN ('sticker_esim', 'embedded_esim') THEN sims.card_type
+        ELSE excluded.card_type
+    END,
     last_seen_at  = excluded.last_seen_at
 `
 	var msisdnArg any
