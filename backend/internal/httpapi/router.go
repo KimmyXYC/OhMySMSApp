@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -107,8 +108,20 @@ func NewRouter(deps Deps) http.Handler {
 	// 托管静态前端（SPA），非 /api /ws /healthz 的路径落到 index.html
 	if deps.WebRoot != "" {
 		fs := http.FileServer(http.Dir(deps.WebRoot))
+		// /assets/* 打包产出的带 hash 文件
 		r.Handle("/assets/*", fs)
-		r.Handle("/favicon.ico", fs)
+		// 根目录下的静态资源（favicon/robots 等）。前端 index.html 通过
+		// <link rel="icon" href="/favicon.svg"> 引用，这类请求必须返回真实文件，
+		// 不能落到 SPA fallback（否则返回 HTML 导致浏览器无法解析为图标）。
+		registerStaticFile := func(path, name string) {
+			h := serveStaticOrEmpty(deps.WebRoot, name)
+			r.Get(path, h)
+			r.Head(path, h) // 某些浏览器/爬虫会先 HEAD 探测图标
+		}
+		registerStaticFile("/favicon.ico", "favicon.ico")
+		registerStaticFile("/favicon.svg", "favicon.svg")
+		registerStaticFile("/robots.txt", "robots.txt")
+		registerStaticFile("/manifest.webmanifest", "manifest.webmanifest")
 		r.NotFound(func(w http.ResponseWriter, req *http.Request) {
 			http.ServeFile(w, req, filepath.Join(deps.WebRoot, "index.html"))
 		})
@@ -126,4 +139,17 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 // writeError 写标准错误体。
 func writeError(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg, "code": code})
+}
+
+// serveStaticOrEmpty 返回一个 handler：若 webRoot/name 存在则 serve，否则 404。
+// 用于根目录下的可选静态文件（favicon 等），避免它们落到 SPA fallback 返回 HTML。
+func serveStaticOrEmpty(webRoot, name string) http.HandlerFunc {
+	full := filepath.Join(webRoot, name)
+	return func(w http.ResponseWriter, req *http.Request) {
+		if _, err := os.Stat(full); err != nil {
+			http.NotFound(w, req)
+			return
+		}
+		http.ServeFile(w, req, full)
+	}
 }
