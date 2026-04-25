@@ -71,6 +71,189 @@ func formatSMSNotification(rec modem.SMSRecord, modemLabel, simLabel, deviceID s
 	return b.String()
 }
 
+// lastN 返回字符串末尾 n 个字符。不足 n 直接返回原串。
+// 这里以 rune 计数，避免中间截断多字节字符；ICCID/IMEI 一般是 ASCII，但 ICCID 末位可能含
+// X/F 等，所以用 rune 安全。
+func lastN(s string, n int) string {
+	if n <= 0 || s == "" {
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[len(r)-n:])
+}
+
+// modemDisplayName 选择 modem 的显示名：优先 nickname，其次 model，最后 deviceID。
+func modemDisplayName(nickname, model, deviceID string) string {
+	if nickname != "" {
+		return nickname
+	}
+	if model != "" {
+		return model
+	}
+	return deviceID
+}
+
+// formatModemOnline 生成 modem 上线推送消息（MarkdownV2）。
+//
+//	🟢 *模块上线*
+//	<nickname or model>
+//	IMEI: …<last4>
+//	SIM: <msisdn> (<operator>)        // 仅当有 SIM
+//	信号: 📶 <pct>% <tech>             // 仅当有信号
+func formatModemOnline(st modem.ModemState, nickname string) string {
+	var b strings.Builder
+	b.WriteString("🟢 *模块上线*\n")
+	name := modemDisplayName(nickname, st.Model, st.DeviceID)
+	b.WriteString(escapeMarkdownV2(name))
+	b.WriteString("\n")
+	if st.IMEI != "" {
+		b.WriteString(escapeMarkdownV2("IMEI: …" + lastN(st.IMEI, 4)))
+		b.WriteString("\n")
+	}
+	if st.SIM != nil {
+		simLine := "SIM: "
+		num := ""
+		if st.SIM.MSISDN != "" {
+			num = st.SIM.MSISDN
+		} else if len(st.OwnNumbers) > 0 {
+			num = st.OwnNumbers[0]
+		}
+		op := nonEmpty(st.SIM.OperatorName, st.OperatorName)
+		switch {
+		case num != "" && op != "":
+			simLine += num + " (" + op + ")"
+		case num != "":
+			simLine += num
+		case op != "":
+			simLine += "…" + lastN(st.SIM.ICCID, 4) + " (" + op + ")"
+		default:
+			simLine += "…" + lastN(st.SIM.ICCID, 4)
+		}
+		b.WriteString(escapeMarkdownV2(simLine))
+		b.WriteString("\n")
+	}
+	if st.SignalRecent {
+		tech := ""
+		if len(st.AccessTech) > 0 {
+			tech = " " + strings.ToUpper(strings.Join(st.AccessTech, ","))
+		}
+		b.WriteString(escapeMarkdownV2(fmt.Sprintf("信号: 📶 %d%%%s", st.SignalQuality, tech)))
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// formatModemOffline 生成 modem 离线推送消息。
+//
+//	🔴 *模块离线*
+//	<name>
+//	IMEI: …<last4>
+func formatModemOffline(st modem.ModemState, nickname string) string {
+	var b strings.Builder
+	b.WriteString("🔴 *模块离线*\n")
+	name := modemDisplayName(nickname, st.Model, st.DeviceID)
+	b.WriteString(escapeMarkdownV2(name))
+	b.WriteString("\n")
+	if st.IMEI != "" {
+		b.WriteString(escapeMarkdownV2("IMEI: …" + lastN(st.IMEI, 4)))
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// formatSIMInserted 生成 SIM 插入推送消息。
+//
+//	💳 *SIM 插入*
+//	<modem name>
+//	ICCID: …<last5>
+//	号码: <msisdn>          // 可选
+//	运营商: <name>          // 可选
+func formatSIMInserted(st modem.ModemState, nickname string) string {
+	var b strings.Builder
+	b.WriteString("💳 *SIM 插入*\n")
+	name := modemDisplayName(nickname, st.Model, st.DeviceID)
+	b.WriteString(escapeMarkdownV2(name))
+	b.WriteString("\n")
+	if st.SIM != nil {
+		if st.SIM.ICCID != "" {
+			b.WriteString(escapeMarkdownV2("ICCID: …" + lastN(st.SIM.ICCID, 5)))
+			b.WriteString("\n")
+		}
+		num := st.SIM.MSISDN
+		if num == "" && len(st.OwnNumbers) > 0 {
+			num = st.OwnNumbers[0]
+		}
+		if num != "" {
+			b.WriteString(escapeMarkdownV2("号码: " + num))
+			b.WriteString("\n")
+		}
+		op := nonEmpty(st.SIM.OperatorName, st.OperatorName)
+		if op != "" {
+			b.WriteString(escapeMarkdownV2("运营商: " + op))
+			b.WriteString("\n")
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// formatSIMRemoved 生成 SIM 拔出推送消息。
+// 当前 ModemState 已经没有 SIM，所以前一次的 ICCID/operator 由 caller 传入。
+//
+//	🚫 *SIM 拔出*
+//	<modem name>
+//	(原 SIM: …<last5> · <operator>)
+func formatSIMRemoved(st modem.ModemState, nickname, prevICCID, prevOperator string) string {
+	var b strings.Builder
+	b.WriteString("🚫 *SIM 拔出*\n")
+	name := modemDisplayName(nickname, st.Model, st.DeviceID)
+	b.WriteString(escapeMarkdownV2(name))
+	b.WriteString("\n")
+	if prevICCID != "" || prevOperator != "" {
+		parts := []string{}
+		if prevICCID != "" {
+			parts = append(parts, "…"+lastN(prevICCID, 5))
+		}
+		if prevOperator != "" {
+			parts = append(parts, prevOperator)
+		}
+		b.WriteString(escapeMarkdownV2("(原 SIM: " + strings.Join(parts, " · ") + ")"))
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// formatSIMReplaced 生成 SIM 替换推送消息。
+//
+//	🔄 *SIM 替换*
+//	<modem name>
+//	原: …<prev5> → 新: …<new5>
+//	运营商: <new operator>     // 可选
+func formatSIMReplaced(st modem.ModemState, nickname, prevICCID string) string {
+	var b strings.Builder
+	b.WriteString("🔄 *SIM 替换*\n")
+	name := modemDisplayName(nickname, st.Model, st.DeviceID)
+	b.WriteString(escapeMarkdownV2(name))
+	b.WriteString("\n")
+	newICCID := ""
+	if st.SIM != nil {
+		newICCID = st.SIM.ICCID
+	}
+	b.WriteString(escapeMarkdownV2(fmt.Sprintf("原: …%s → 新: …%s",
+		lastN(prevICCID, 5), lastN(newICCID, 5))))
+	b.WriteString("\n")
+	if st.SIM != nil {
+		op := nonEmpty(st.SIM.OperatorName, st.OperatorName)
+		if op != "" {
+			b.WriteString(escapeMarkdownV2("运营商: " + op))
+			b.WriteString("\n")
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 // formatModemOverview 生成 /status 概览消息。
 func formatModemOverview(modems []modem.ModemState) string {
 	if len(modems) == 0 {

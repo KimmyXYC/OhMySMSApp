@@ -1,6 +1,7 @@
 # Go
 /backend/bin/
 /backend/dist/
+/backend/ohmysmsd
 *.exe
 *.test
 *.out

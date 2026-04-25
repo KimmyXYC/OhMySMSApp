@@ -40,6 +40,13 @@ type bot struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	// SIM 物理插拔跟踪：deviceID -> 上次见到的 SIM 快照。
+	// 通过比对 EventModemUpdated 携带的 ModemState.SIM 变化推送 SIM 插入/拔出/替换通知；
+	// 这是因为 mmprovider 不会单独发 SimRemoved 事件（SIM 被拔出时是把 ModemState.SIM 置空、
+	// 然后发 ModemUpdated），所以 bot 自己维护跨事件的 diff 状态。
+	simStateMu      sync.Mutex
+	lastSIMByDevice map[string]simSnapshot
 }
 
 // newBot 创建 bot（含与 Telegram API 的连接）。token 为空返回 error。
@@ -66,18 +73,19 @@ func newBotWithAPI(parent context.Context,
 ) *bot {
 	ctx, cancel := context.WithCancel(parent)
 	return &bot{
-		api:         api,
-		chatID:      chatID,
-		pushSMS:     pushSMS,
-		provider:    provider,
-		runner:      runner,
-		store:       store,
-		audit:       auditSvc,
-		log:         log,
-		sessions:    newSessionStore(5 * time.Minute),
-		rateLimiter: newRateLimiter(100 * time.Millisecond),
-		ctx:         ctx,
-		cancel:      cancel,
+		api:             api,
+		chatID:          chatID,
+		pushSMS:         pushSMS,
+		provider:        provider,
+		runner:          runner,
+		store:           store,
+		audit:           auditSvc,
+		log:             log,
+		sessions:        newSessionStore(5 * time.Minute),
+		rateLimiter:     newRateLimiter(100 * time.Millisecond),
+		ctx:             ctx,
+		cancel:          cancel,
+		lastSIMByDevice: make(map[string]simSnapshot),
 	}
 }
 
