@@ -78,6 +78,7 @@ func testBot(t *testing.T, provider modem.Provider) (*bot, *fakeBotAPI) {
 	fb := newFakeBotAPI()
 	b := newBotWithAPI(context.Background(), fb, 12345, true,
 		provider, nil, nil, nil, nil, discardLogger())
+	b.offlineGrace = 20 * time.Millisecond
 	return b, fb
 }
 
@@ -177,6 +178,7 @@ func TestPushModemOffline(t *testing.T) {
 			IMEI: "861234567899306",
 		},
 	})
+	time.Sleep(40 * time.Millisecond)
 	if fb.sentCount() != 1 {
 		t.Fatal("expected one send")
 	}
@@ -336,11 +338,12 @@ func TestPushModemRemoved_ClearsSnapshot(t *testing.T) {
 	b.dispatchEvent(modem.Event{Kind: modem.EventModemAdded, DeviceID: dev, Payload: stOld})
 	b.dispatchEvent(modem.Event{Kind: modem.EventModemRemoved, DeviceID: dev, Payload: stOld})
 	// 再次上线，新 SIM —— 应该走 ModemAdded → 上线消息，不要触发"SIM 替换"
+	time.Sleep(5 * time.Millisecond)
 	b.dispatchEvent(modem.Event{Kind: modem.EventModemAdded, DeviceID: dev, Payload: stNew})
 
-	// 期望 3 条：online(old) + offline + online(new)
-	if fb.sentCount() != 3 {
-		t.Fatalf("expected 3 sends, got %d", fb.sentCount())
+	// 期望 1 条：只有首次上线，短暂 remove/add 被整体抑制，不推 offline/online
+	if fb.sentCount() != 1 {
+		t.Fatalf("expected 1 send, got %d", fb.sentCount())
 	}
 	last := fb.lastMessageText()
 	if !strings.Contains(last, "上线") {
@@ -348,6 +351,21 @@ func TestPushModemRemoved_ClearsSnapshot(t *testing.T) {
 	}
 	if strings.Contains(last, "替换") {
 		t.Errorf("should NOT report SIM replacement after re-add: %s", last)
+	}
+}
+
+func TestPushModemRemovedThenAddedWithinGrace_IsSuppressed(t *testing.T) {
+	prov := modem.NewMockProvider(discardLogger())
+	b, fb := testBot(t, prov)
+	dev := "dev-flap"
+	st := modem.ModemState{DeviceID: dev, Model: "EC20F", IMEI: "861234567899306"}
+	b.dispatchEvent(modem.Event{Kind: modem.EventModemAdded, DeviceID: dev, Payload: st})
+	b.dispatchEvent(modem.Event{Kind: modem.EventModemRemoved, DeviceID: dev, Payload: st})
+	time.Sleep(5 * time.Millisecond)
+	b.dispatchEvent(modem.Event{Kind: modem.EventModemAdded, DeviceID: dev, Payload: st})
+	time.Sleep(40 * time.Millisecond)
+	if fb.sentCount() != 1 {
+		t.Fatalf("expected flap to be suppressed, got %d sends", fb.sentCount())
 	}
 }
 

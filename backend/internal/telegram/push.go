@@ -54,6 +54,9 @@ func (b *bot) dispatchEvent(ev modem.Event) {
 		if !ok {
 			return
 		}
+		if b.cancelPendingOffline(ev.DeviceID, st) {
+			return
+		}
 		nickname := b.lookupNickname(ev.DeviceID)
 		// 初始化 SIM 状态记录，避免下一次 ModemUpdated 误报为"插入"。
 		b.recordSIMSnapshot(ev.DeviceID, st)
@@ -61,14 +64,15 @@ func (b *bot) dispatchEvent(ev modem.Event) {
 
 	case modem.EventModemRemoved:
 		st, _ := ev.Payload.(modem.ModemState)
-		nickname := b.lookupNickname(ev.DeviceID)
-		// 清除 SIM 跟踪状态。
-		b.clearSIMSnapshot(ev.DeviceID)
-		_, _ = b.sendText(formatModemOffline(st, nickname))
+		b.scheduleOffline(ev.DeviceID, st)
 
 	case modem.EventModemUpdated:
 		st, ok := ev.Payload.(modem.ModemState)
 		if !ok {
+			return
+		}
+		if b.hasPendingOffline(ev.DeviceID) {
+			b.recordSIMSnapshot(ev.DeviceID, st)
 			return
 		}
 		b.handleSIMDiff(ev.DeviceID, st)
@@ -100,6 +104,53 @@ func (b *bot) dispatchEvent(ev modem.Event) {
 		b.rateLimiter.wait(b.ctx, b.chatID)
 		_, _ = b.api.Send(msg)
 	}
+}
+
+func (b *bot) scheduleOffline(deviceID string, st modem.ModemState) {
+	b.simStateMu.Lock()
+	if old := b.pendingOffline[deviceID]; old != nil {
+		old.Stop()
+	}
+	grace := b.offlineGrace
+	if grace <= 0 {
+		grace = 20 * time.Second
+	}
+	timer := time.AfterFunc(grace, func() {
+		select {
+		case <-b.ctx.Done():
+			return
+		default:
+		}
+		b.simStateMu.Lock()
+		delete(b.pendingOffline, deviceID)
+		b.simStateMu.Unlock()
+		nickname := b.lookupNickname(deviceID)
+		b.clearSIMSnapshot(deviceID)
+		_, _ = b.sendText(formatModemOffline(st, nickname))
+	})
+	b.pendingOffline[deviceID] = timer
+	b.simStateMu.Unlock()
+}
+
+func (b *bot) cancelPendingOffline(deviceID string, st modem.ModemState) bool {
+	b.simStateMu.Lock()
+	timer := b.pendingOffline[deviceID]
+	if timer != nil {
+		timer.Stop()
+		delete(b.pendingOffline, deviceID)
+	}
+	b.simStateMu.Unlock()
+	if timer != nil {
+		b.recordSIMSnapshot(deviceID, st)
+		return true
+	}
+	return false
+}
+
+func (b *bot) hasPendingOffline(deviceID string) bool {
+	b.simStateMu.Lock()
+	defer b.simStateMu.Unlock()
+	return b.pendingOffline[deviceID] != nil
 }
 
 // lookupNickname 从 store 查询 modem 的 nickname。无 store / 找不到 / 出错 → 返回 ""。
@@ -223,4 +274,3 @@ func (b *bot) pushSMSReceived(deviceID string, rec modem.SMSRecord) {
 		b.log.Warn("telegram push sms failed", "err", err, "peer", rec.Peer)
 	}
 }
-

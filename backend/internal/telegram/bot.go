@@ -49,6 +49,8 @@ type bot struct {
 	// 然后发 ModemUpdated），所以 bot 自己维护跨事件的 diff 状态。
 	simStateMu      sync.Mutex
 	lastSIMByDevice map[string]simSnapshot
+	pendingOffline  map[string]*time.Timer
+	offlineGrace    time.Duration
 }
 
 // newBot 创建 bot（含与 Telegram API 的连接）。token 为空返回 error。
@@ -89,6 +91,8 @@ func newBotWithAPI(parent context.Context,
 		ctx:             ctx,
 		cancel:          cancel,
 		lastSIMByDevice: make(map[string]simSnapshot),
+		pendingOffline:  make(map[string]*time.Timer),
+		offlineGrace:    20 * time.Second,
 	}
 }
 
