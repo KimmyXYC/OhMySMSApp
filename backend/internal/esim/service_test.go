@@ -526,7 +526,7 @@ func TestAddProfile_WithActivationCode(t *testing.T) {
 		}
 	}
 	detail, payload, err := svc.AddProfile(ctx, 1, AddProfileRequest{
-		ActivationCode: "LPA:1$rsp.truphone.com$QRF-BETTERROAMING-PMRDGIR2EARDEIT5",
+		ActivationCode: "LPA:1$example.invalid$TEST-MATCHING-ID",
 	})
 	if err != nil {
 		t.Fatalf("add: %v", err)

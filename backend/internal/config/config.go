@@ -88,8 +88,8 @@ func Default() Config {
 			PushSMS: true,
 		},
 		ESIM: ESIMConfig{
-			LPACBin:             "/opt/ohmysmsapp/bin/lpac",
-			LPACDriversDir:      "/opt/ohmysmsapp/bin/lpac-drivers",
+			LPACBin:             "lpac",
+			LPACDriversDir:      "",
 			InhibitModemManager: true,
 			AIDs:                map[string]string{},
 			OperationTimeout:    30 * time.Second,

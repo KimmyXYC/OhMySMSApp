@@ -542,12 +542,6 @@ function isCardOperating(cardId: number): boolean {
         >
           扫描发现
         </el-button>
-        <el-button
-          :icon="Refresh"
-          circle
-          @click="store.fetchCards()"
-          :loading="store.loading"
-        />
       </div>
     </div>
 

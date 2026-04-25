@@ -1,158 +1,108 @@
 # ohmysmsapp Makefile
-# 约定：开发机 amd64，目标 aarch64（树莓派 5）
-#   - make build            本地编译（amd64，用于本地调试）
-#   - make build-arm64      交叉编译 aarch64 二进制
-#   - make frontend-build   打包 Vue dist
-#   - make deploy           完整流水线：前端 build → 后端交叉编译 → rsync → 重启 systemd
 #
-# 可覆盖：
-#   PI_HOST=kimmy@172.16.84.233  部署目标
-#   PI_DEST=/opt/ohmysmsapp       远端目录
-#   PI_SERVICE=ohmysmsd            systemd 单元名
-#   GOPROXY=https://goproxy.cn,direct
+# 可通过变量覆盖目标平台与部署信息：
+#   make build-linux-arm64 TARGET_GOOS=linux TARGET_GOARCH=arm64
+#   make deploy DEPLOY_HOST=user@example-host DEPLOY_DIR=/srv/ohmysmsapp DEPLOY_SERVICE=ohmysmsd
 
-SHELL      := /bin/bash
-VERSION    ?= $(shell git describe --tags --dirty --always 2>/dev/null || echo "dev")
-COMMIT     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-LDFLAGS    := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)
+SHELL := /bin/bash
 
-PI_HOST    ?= kimmy@172.16.84.233
-PI_DEST    ?= /opt/ohmysmsapp
-PI_SERVICE ?= ohmysmsd
+VERSION ?= $(shell git describe --tags --dirty --always 2>/dev/null || echo "dev")
+COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)
 
 GO_MODULE_DIR := backend
 FE_DIR        := frontend
 DIST_DIR      := deploy/build
 
+TARGET_GOOS   ?= linux
+TARGET_GOARCH ?= arm64
+
+DEPLOY_HOST    ?=
+DEPLOY_DIR     ?= /srv/ohmysmsapp
+DEPLOY_SERVICE ?= ohmysmsd
+
 .PHONY: help
 help:
-	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
-
-# ---------- 后端 ----------
+	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z0-9_.-]+:.*?##/ { printf "  \033[36m%-24s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 .PHONY: backend-deps
-backend-deps: ## 下载 Go 依赖
+backend-deps: ## 下载并整理 Go 依赖
 	cd $(GO_MODULE_DIR) && go mod tidy
 
 .PHONY: build
-build: ## 本地编译后端（调试用）
-	cd $(GO_MODULE_DIR) && go build -ldflags="$(LDFLAGS)" -o ../$(DIST_DIR)/ohmysmsd-local ./cmd/ohmysmsd
+build: ## 构建当前平台后端二进制
+	@mkdir -p $(DIST_DIR)
+	cd $(GO_MODULE_DIR) && go build -trimpath -ldflags="$(LDFLAGS)" -o ../$(DIST_DIR)/ohmysmsd-local ./cmd/ohmysmsd
 
-.PHONY: build-arm64
-build-arm64: ## 交叉编译 aarch64（树莓派 5）
+.PHONY: build-linux-arm64
+build-linux-arm64: ## 构建指定 TARGET_GOOS/TARGET_GOARCH 的后端二进制
 	@mkdir -p $(DIST_DIR)
 	cd $(GO_MODULE_DIR) && \
-		CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
-		go build -trimpath -ldflags="$(LDFLAGS)" \
-		-o ../$(DIST_DIR)/ohmysmsd ./cmd/ohmysmsd
-	@ls -la $(DIST_DIR)/ohmysmsd
+		CGO_ENABLED=0 GOOS=$(TARGET_GOOS) GOARCH=$(TARGET_GOARCH) \
+		go build -trimpath -ldflags="$(LDFLAGS)" -o ../$(DIST_DIR)/ohmysmsd ./cmd/ohmysmsd
 
 .PHONY: backend-run-local
-backend-run-local: ## 本地跑后端（需存在 backend/config.yaml）
-	cd $(GO_MODULE_DIR) && \
-		go run ./cmd/ohmysmsd -config config.yaml
+backend-run-local: ## 本地运行后端（需准备 backend/config.yaml）
+	cd $(GO_MODULE_DIR) && go run ./cmd/ohmysmsd -config config.yaml
 
 .PHONY: test
-test: ## 跑后端测试
-	cd $(GO_MODULE_DIR) && go test ./... -race -count=1
+test: ## 运行后端测试
+	cd $(GO_MODULE_DIR) && go test ./... -count=1
 
 .PHONY: lint
-lint: ## vet
+lint: ## 运行 go vet
 	cd $(GO_MODULE_DIR) && go vet ./...
 
-# ---------- 前端 ----------
-
 .PHONY: frontend-install
-frontend-install: ## npm install
+frontend-install: ## 安装前端依赖
 	cd $(FE_DIR) && npm install
 
 .PHONY: frontend-dev
-frontend-dev: ## Vite dev server (代理到 $(BACKEND_URL))
+frontend-dev: ## 启动前端开发服务器
 	cd $(FE_DIR) && npm run dev
 
 .PHONY: frontend-build
-frontend-build: ## 打包 Vue dist 到 deploy/build/web/
+frontend-build: ## 构建前端并复制到 deploy/build/web/
 	cd $(FE_DIR) && npm run build
 	@mkdir -p $(DIST_DIR)/web
 	@rm -rf $(DIST_DIR)/web/*
 	@cp -r $(FE_DIR)/dist/* $(DIST_DIR)/web/
-	@ls -la $(DIST_DIR)/web/
 
-# ---------- 部署 ----------
+.PHONY: deploy-check
+deploy-check:
+	@if [ -z "$(DEPLOY_HOST)" ]; then \
+		echo "DEPLOY_HOST is required, e.g. make deploy DEPLOY_HOST=user@example-host"; \
+		exit 1; \
+	fi
 
 .PHONY: deploy
-deploy: build-arm64 frontend-build ## 构建 + rsync 到树莓派 + 重启服务
-	@echo "==> deploy to $(PI_HOST):$(PI_DEST)"
-	ssh $(PI_HOST) "sudo mkdir -p $(PI_DEST)/bin $(PI_DEST)/web $(PI_DEST)/data && sudo chown -R \$$(whoami):\$$(whoami) $(PI_DEST)"
-	rsync -avz --progress \
-		$(DIST_DIR)/ohmysmsd \
-		$(PI_HOST):$(PI_DEST)/bin/ohmysmsd.new
-	rsync -avz --delete --progress \
-		$(DIST_DIR)/web/ \
-		$(PI_HOST):$(PI_DEST)/web/
-	rsync -avz \
-		backend/config.example.yaml \
-		$(PI_HOST):$(PI_DEST)/config.example.yaml
-	rsync -avz \
-		deploy/systemd/ohmysmsd.service \
-		$(PI_HOST):/tmp/ohmysmsd.service
-	ssh $(PI_HOST) '\
-		sudo mv $(PI_DEST)/bin/ohmysmsd.new $(PI_DEST)/bin/ohmysmsd && \
-		sudo chmod +x $(PI_DEST)/bin/ohmysmsd && \
-		[ -f $(PI_DEST)/config.yaml ] || cp $(PI_DEST)/config.example.yaml $(PI_DEST)/config.yaml && \
-		sudo mv /tmp/ohmysmsd.service /etc/systemd/system/$(PI_SERVICE).service && \
-		sudo systemctl daemon-reload && \
-		sudo systemctl enable $(PI_SERVICE) && \
-		sudo systemctl restart $(PI_SERVICE) && \
-		sleep 1 && \
-		sudo systemctl --no-pager status $(PI_SERVICE) | head -15 \
-	'
+deploy: deploy-check build-linux-arm64 frontend-build ## 部署后端与前端到远端主机
+	@echo "==> deploy to $(DEPLOY_HOST):$(DEPLOY_DIR)"
+	ssh $(DEPLOY_HOST) "sudo mkdir -p $(DEPLOY_DIR)/bin $(DEPLOY_DIR)/web $(DEPLOY_DIR)/data && sudo chown -R \$$(id -un):\$$(id -gn) $(DEPLOY_DIR)"
+	rsync -avz --progress $(DIST_DIR)/ohmysmsd $(DEPLOY_HOST):$(DEPLOY_DIR)/bin/ohmysmsd.new
+	rsync -avz --delete --progress $(DIST_DIR)/web/ $(DEPLOY_HOST):$(DEPLOY_DIR)/web/
+	rsync -avz backend/config.example.yaml $(DEPLOY_HOST):$(DEPLOY_DIR)/config.example.yaml
+	ssh $(DEPLOY_HOST) '
+		sudo mv $(DEPLOY_DIR)/bin/ohmysmsd.new $(DEPLOY_DIR)/bin/ohmysmsd && \
+		sudo chmod +x $(DEPLOY_DIR)/bin/ohmysmsd && \
+		[ -f $(DEPLOY_DIR)/config.yaml ] || cp $(DEPLOY_DIR)/config.example.yaml $(DEPLOY_DIR)/config.yaml && \
+		sudo systemctl restart $(DEPLOY_SERVICE) && \
+		sleep 1 && sudo systemctl --no-pager status $(DEPLOY_SERVICE) | sed -n "1,15p"'
 
-.PHONY: pi-logs
-pi-logs: ## tail 树莓派上的服务日志
-	ssh $(PI_HOST) "sudo journalctl -u $(PI_SERVICE) -f -n 50"
+.PHONY: remote-status
+remote-status: deploy-check ## 查看远端服务状态
+	ssh $(DEPLOY_HOST) "sudo systemctl --no-pager status $(DEPLOY_SERVICE)"
 
-.PHONY: pi-status
-pi-status: ## 查看服务状态
-	ssh $(PI_HOST) "sudo systemctl --no-pager status $(PI_SERVICE)"
+.PHONY: remote-logs
+remote-logs: deploy-check ## tail 远端服务日志
+	ssh $(DEPLOY_HOST) "sudo journalctl -u $(DEPLOY_SERVICE) -f -n 50"
 
-.PHONY: pi-restart
-pi-restart: ## 重启服务
-	ssh $(PI_HOST) "sudo systemctl restart $(PI_SERVICE)"
-
-.PHONY: pi-stop
-pi-stop: ## 停止服务
-	ssh $(PI_HOST) "sudo systemctl stop $(PI_SERVICE)"
-
-.PHONY: pi-install-lpac
-pi-install-lpac: ## 在树莓派上把 lpac 二进制 + 共享库 + APDU 驱动安装到 $(PI_DEST)/bin/
-	@echo "==> install lpac on $(PI_HOST) (expects /tmp/lpac/build to exist there)"
-	ssh $(PI_HOST) '\
-		set -e; \
-		test -x /tmp/lpac/build/src/lpac || (echo "lpac binary not found at /tmp/lpac/build/src/lpac" && exit 1); \
-		sudo install -m 0755 -d $(PI_DEST)/bin/driver; \
-		sudo install -m 0755 /tmp/lpac/build/src/lpac $(PI_DEST)/bin/lpac; \
-		# 把 RUNPATH 改为 $$ORIGIN，让 lpac 从同目录加载核心 .so，从 ./driver/ 加载 APDU 驱动 \
-		sudo patchelf --set-rpath "\$$ORIGIN" $(PI_DEST)/bin/lpac; \
-		# 核心库（loader / euicc / utils）放到 lpac 同目录（$$ORIGIN 命中） \
-		sudo install -m 0755 /tmp/lpac/build/driver/libeuicc-driver-loader.so.2 $(PI_DEST)/bin/; \
-		sudo install -m 0755 /tmp/lpac/build/euicc/libeuicc.so.2 $(PI_DEST)/bin/; \
-		sudo install -m 0755 /tmp/lpac/build/utils/liblpac-utils.so $(PI_DEST)/bin/; \
-		sudo ln -sf libeuicc.so.2 $(PI_DEST)/bin/libeuicc.so; \
-		sudo ln -sf libeuicc-driver-loader.so.2 $(PI_DEST)/bin/libeuicc-driver-loader.so; \
-		# APDU + HTTP 驱动放到 ./driver/（lpac loader 写死的子目录名） \
-		for so in /tmp/lpac/build/driver/driver_apdu_*.so /tmp/lpac/build/driver/driver_http_*.so; do \
-			[ -e "$$so" ] || continue; \
-			sudo install -m 0755 "$$so" $(PI_DEST)/bin/driver/; \
-		done; \
-		echo "installed:"; \
-		ls -la $(PI_DEST)/bin/lpac $(PI_DEST)/bin/*.so* $(PI_DEST)/bin/driver/ \
-	'
-
-# ---------- 清理 ----------
+.PHONY: remote-restart
+remote-restart: deploy-check ## 重启远端服务
+	ssh $(DEPLOY_HOST) "sudo systemctl restart $(DEPLOY_SERVICE)"
 
 .PHONY: clean
-clean:
+clean: ## 清理构建产物
 	rm -rf $(DIST_DIR)
 	cd $(GO_MODULE_DIR) && go clean
 

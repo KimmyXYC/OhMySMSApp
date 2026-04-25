@@ -20,11 +20,13 @@ database:
   path: "./data/ohmysmsapp.db"
 
 auth:
-  # JWT 签名密钥（bytes，≥32）。首次启动若为空会自动生成到该文件相邻目录。
+  # JWT 签名密钥（bytes，≥32）。生产环境必须设置为随机高强度值。
+  # 留空时程序会自动生成临时值，仅适合开发/测试。
   jwt_secret: ""
-  # 单用户模式的登录用户名。
+  # 单用户模式的登录用户名。建议改掉默认 admin。
   username: "admin"
   # 登录密码的 bcrypt hash；通过 `ohmysmsd hash-password` 生成。
+  # 生产环境必须设置。留空会进入开发模式（任意密码通过）。
   password_bcrypt: ""
   # Token 有效期（Go duration）。
   token_ttl: "720h"
@@ -44,11 +46,11 @@ telegram:
   push_sms: true
 
 esim:
-  # lpac 可执行文件路径。
-  lpac_bin: "/opt/ohmysmsapp/bin/lpac"
+  # lpac 可执行文件路径。若已在 PATH 中，可直接写 `lpac`。
+  lpac_bin: "lpac"
   # lpac 驱动 .so 目录（LIBEUICC_DRIVER_SEARCH_PATH 兜底）。
-  # 默认与 lpac_bin 同目录的 lpac-drivers/；保留默认即可。
-  lpac_drivers_dir: "/opt/ohmysmsapp/bin/lpac-drivers"
+  # 若 lpac 和驱动已通过系统包或 ldconfig 安装，可留空。
+  lpac_drivers_dir: ""
   # 切换 profile 期间是否对目标模块执行 ModemManager InhibitDevice。
   # 必须为 true，否则 lpac 会抢占失败。
   inhibit_modem_manager: true
