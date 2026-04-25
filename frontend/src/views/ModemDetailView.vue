@@ -30,6 +30,10 @@ const modem = ref<ModemRow | null>(null)
 const loading = ref(true)
 const signalHistory = ref<SignalRow[]>([])
 const chartLoading = ref(false)
+const isMobile = ref(false)
+const handleResize = () => {
+  isMobile.value = window.innerWidth <= 767
+}
 
 // Nickname editing state
 const editingNickname = ref(false)
@@ -37,6 +41,7 @@ const nicknameInput = ref('')
 const nicknameSaving = ref(false)
 
 const deviceId = computed(() => route.params.deviceId as string)
+const descColumns = computed(() => isMobile.value ? 1 : 2)
 
 // 显示标题
 const displayTitle = computed(() => {
@@ -155,6 +160,8 @@ async function loadSignalHistory() {
 let refreshInterval: ReturnType<typeof setInterval> | undefined
 
 onMounted(async () => {
+  handleResize()
+  window.addEventListener('resize', handleResize)
   try {
     modem.value = await modemsStore.fetchModem(deviceId.value)
   } catch (e: any) {
@@ -175,6 +182,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (refreshInterval) clearInterval(refreshInterval)
+  window.removeEventListener('resize', handleResize)
 })
 
 function handleReset() {
@@ -232,7 +240,7 @@ const portList = computed(() => {
               v-model="nicknameInput"
               size="small"
               placeholder="输入备注名..."
-              style="width: 200px"
+              class="modem-title__input"
               @keyup.enter="saveNickname"
               @keyup.escape="cancelEditNickname"
             />
@@ -265,7 +273,7 @@ const portList = computed(() => {
     <div v-loading="loading">
       <div v-if="modem" style="margin-top: 24px">
         <!-- 基本信息 -->
-        <el-descriptions :column="2" border>
+        <el-descriptions :column="descColumns" border>
           <el-descriptions-item label="Device ID">
             <span class="mono">{{ modem.device_id }}</span>
           </el-descriptions-item>
@@ -369,11 +377,39 @@ const portList = computed(() => {
       color: var(--el-color-primary);
     }
   }
+
+  &__input {
+    width: 200px;
+  }
 }
 
 .modem-actions {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+@media (max-width: 767px) {
+  .modem-title {
+    align-items: stretch;
+    flex-direction: column;
+
+    &__input {
+      width: 100%;
+    }
+  }
+
+  .modem-actions {
+    width: 100%;
+  }
+
+  .modem-actions :deep(.el-button) {
+    flex: 1 1 auto;
+  }
+
+  .mono {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
 }
 </style>

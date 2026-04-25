@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useSmsStore } from '@/stores/sms'
 import { useModemsStore } from '@/stores/modems'
@@ -37,9 +37,10 @@ const sendText = ref('')
 
 // 响应式：小屏模式
 const isMobile = ref(window.innerWidth < 768)
-window.addEventListener('resize', () => {
+const handleResize = () => {
   isMobile.value = window.innerWidth < 768
-})
+}
+window.addEventListener('resize', handleResize)
 
 /** 生成 thread 的复合唯一 key */
 function threadKey(peer: string, simId: number | null | undefined): string {
@@ -216,6 +217,10 @@ onMounted(async () => {
     })
   }
 })
+
+onUnmounted(() => {
+  window.removeEventListener('resize', handleResize)
+})
 </script>
 
 <template>
@@ -362,6 +367,7 @@ onMounted(async () => {
 <style scoped lang="scss">
 .sms-page {
   height: calc(100vh - 56px - 40px);
+  height: calc(100dvh - 56px - 40px);
   display: flex;
   flex-direction: column;
   max-width: 100%;
@@ -555,6 +561,24 @@ onMounted(async () => {
 
 /* 手机端切换 */
 @media (max-width: 767px) {
+  .sms-page {
+    height: calc(100dvh - 56px - 24px);
+  }
+
+  .sms-toolbar {
+    align-items: stretch;
+    gap: 10px;
+    flex-direction: column;
+
+    &__filters {
+      width: 100%;
+    }
+
+    &__filters :deep(.el-select) {
+      width: 100% !important;
+    }
+  }
+
   .sms-body {
     gap: 0;
   }
@@ -571,6 +595,26 @@ onMounted(async () => {
 
   .sms-detail {
     border-radius: 0;
+
+    &__thread {
+      padding: 12px;
+    }
+
+    &__send {
+      padding: 10px 12px;
+      align-items: stretch;
+      flex-wrap: wrap;
+
+      :deep(.el-select) {
+        width: 100% !important;
+      }
+
+      .el-input,
+      .el-textarea {
+        width: 100%;
+        flex: 1 1 100%;
+      }
+    }
 
     &--hidden {
       display: none;

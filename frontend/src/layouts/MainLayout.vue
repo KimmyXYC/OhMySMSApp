@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuth } from '@/composables/useAuth'
 import { useWebSocket } from '@/composables/useWebSocket'
@@ -25,6 +25,8 @@ const route = useRoute()
 
 const collapsed = ref(false)
 const isDark = ref(document.documentElement.classList.contains('dark'))
+const isMobile = ref(false)
+const mobileMenuOpen = ref(false)
 
 const menuItems = [
   { index: '/dashboard', icon: HomeFilled, label: '控制面板' },
@@ -38,6 +40,10 @@ const menuItems = [
 const activeMenu = computed(() => {
   if (route.path.startsWith('/modems/')) return '/dashboard'
   return route.path
+})
+
+const currentTitle = computed(() => {
+  return menuItems.find((item) => item.index === activeMenu.value)?.label || 'OhMySMS'
 })
 
 const wsTagType = computed(() => {
@@ -62,12 +68,43 @@ function toggleDark() {
   isDark.value = !isDark.value
   document.documentElement.classList.toggle('dark', isDark.value)
 }
+
+function updateMobile() {
+  isMobile.value = window.innerWidth <= 767
+  if (!isMobile.value) mobileMenuOpen.value = false
+}
+
+function toggleSidebar() {
+  if (isMobile.value) {
+    mobileMenuOpen.value = !mobileMenuOpen.value
+  } else {
+    collapsed.value = !collapsed.value
+  }
+}
+
+function handleMenuSelect() {
+  if (isMobile.value) mobileMenuOpen.value = false
+}
+
+onMounted(() => {
+  updateMobile()
+  window.addEventListener('resize', updateMobile)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', updateMobile)
+})
 </script>
 
 <template>
   <el-container class="main-layout">
+    <div v-if="isMobile && mobileMenuOpen" class="main-layout__mobile-mask" @click="mobileMenuOpen = false" />
     <!-- 侧栏 -->
-    <el-aside :width="collapsed ? '64px' : '200px'" class="main-layout__aside">
+    <el-aside
+      :width="collapsed ? '64px' : '200px'"
+      class="main-layout__aside"
+      :class="{ 'main-layout__aside--mobile-open': isMobile && mobileMenuOpen }"
+    >
       <div class="main-layout__logo">
         <img src="/favicon.svg" alt="OhMySMS" width="32" height="32" />
         <span v-show="!collapsed" class="main-layout__logo-text">OhMySMS</span>
@@ -78,6 +115,7 @@ function toggleDark() {
         :collapse="collapsed"
         router
         class="main-layout__menu"
+        @select="handleMenuSelect"
       >
         <el-menu-item v-for="item in menuItems" :key="item.index" :index="item.index">
           <el-icon><component :is="item.icon" /></el-icon>
@@ -90,12 +128,13 @@ function toggleDark() {
       <!-- 顶栏 -->
       <el-header class="main-layout__header">
         <div class="main-layout__header-left">
-          <el-button text @click="collapsed = !collapsed">
+          <el-button text @click="toggleSidebar">
             <el-icon :size="18">
-              <Fold v-if="!collapsed" />
+              <Fold v-if="!isMobile && !collapsed" />
               <Expand v-else />
             </el-icon>
           </el-button>
+          <span v-if="isMobile" class="main-layout__header-title text-ellipsis">{{ currentTitle }}</span>
         </div>
 
         <div class="main-layout__header-right">
@@ -103,10 +142,11 @@ function toggleDark() {
           <BackendSwitcher />
 
           <!-- WS 状态 -->
-          <el-tag :type="wsTagType" size="small" effect="dark" round class="ws-tag">
+          <el-tag v-if="!isMobile" :type="wsTagType" size="small" effect="dark" round class="ws-tag">
             <span class="ws-dot" :class="'ws-dot--' + status" />
             {{ wsLabel }}
           </el-tag>
+          <span v-else class="ws-dot" :class="'ws-dot--' + status" />
 
           <!-- 深浅色切换 -->
           <el-button text @click="toggleDark">
@@ -248,12 +288,38 @@ function toggleDark() {
     position: fixed;
     z-index: 1000;
     height: 100vh;
-    transform: translateX(0);
+    width: 220px !important;
+    transform: translateX(-100%);
     transition: transform 0.3s;
   }
 
-  .main-layout__aside[style*='64px'] {
-    transform: translateX(-100%);
+  .main-layout__aside--mobile-open {
+    transform: translateX(0);
+  }
+
+  .main-layout__mobile-mask {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.35);
+    z-index: 999;
+  }
+
+  .main-layout__header {
+    padding: 0 12px;
+  }
+
+  .main-layout__header-title {
+    font-size: 16px;
+    font-weight: 600;
+    max-width: 120px;
+  }
+
+  .main-layout__header-right {
+    gap: 4px;
+  }
+
+  .main-layout__main {
+    padding: 0;
   }
 }
 </style>

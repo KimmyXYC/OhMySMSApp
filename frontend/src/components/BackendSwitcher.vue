@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useBackendStore, type KnownBackend } from '@/stores/backend'
 import { useAuth } from '@/composables/useAuth'
 import { Connection, Delete, Check } from '@element-plus/icons-vue'
@@ -8,6 +8,7 @@ const backendStore = useBackendStore()
 const { switchBackend, logout } = useAuth()
 
 const showPopover = ref(false)
+const isMobile = ref(false)
 
 const displayCurrent = computed(() => {
   return backendStore.current || window.location.origin + ' (同源)'
@@ -32,13 +33,26 @@ async function handleLogoutCurrent() {
 function isCurrent(url: string): boolean {
   return url === backendStore.current
 }
+
+function updateMobile() {
+  isMobile.value = window.innerWidth <= 767
+}
+
+onMounted(() => {
+  updateMobile()
+  window.addEventListener('resize', updateMobile)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', updateMobile)
+})
 </script>
 
 <template>
   <el-popover
     v-model:visible="showPopover"
     placement="bottom-end"
-    :width="320"
+    :width="isMobile ? 280 : 320"
     trigger="click"
   >
     <template #reference>
@@ -205,6 +219,26 @@ function isCurrent(url: string): boolean {
 
     &:hover {
       opacity: 1;
+    }
+  }
+}
+
+@media (max-width: 767px) {
+  .backend-trigger {
+    width: 44px;
+    min-width: 44px;
+    max-width: 44px;
+    padding: 8px;
+    justify-content: center;
+
+    &__text {
+      display: none;
+    }
+  }
+
+  .backend-popover {
+    &__item-url {
+      max-width: 170px;
     }
   }
 }

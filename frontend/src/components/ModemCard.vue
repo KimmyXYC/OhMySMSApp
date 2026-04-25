@@ -98,29 +98,40 @@ function handleDelete() {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
+    gap: 10px;
   }
 
   &__title {
     display: flex;
     align-items: center;
     gap: 8px;
+    min-width: 0;
+    flex: 1;
   }
 
   &__name-group {
     display: flex;
     flex-direction: column;
     gap: 2px;
+    min-width: 0;
+    flex: 1;
   }
 
   &__name {
     font-weight: 600;
     font-size: 15px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   &__subtitle {
     font-size: 12px;
     color: var(--el-text-color-secondary);
     line-height: 1.3;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   &__info {
@@ -134,6 +145,7 @@ function handleDelete() {
     align-items: center;
     gap: 8px;
     font-size: 13px;
+    min-width: 0;
   }
 
   &__label {
@@ -145,11 +157,26 @@ function handleDelete() {
     font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
     font-size: 12px;
     color: var(--el-text-color-regular);
+    min-width: 0;
   }
 
   &__actions {
     margin-top: 12px;
     text-align: right;
+  }
+}
+
+@media (max-width: 767px) {
+  .modem-card__value {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    white-space: normal;
+  }
+
+  .modem-card__actions .el-button {
+    width: 100%;
+    min-height: 36px;
+    justify-content: center;
   }
 }
 </style>

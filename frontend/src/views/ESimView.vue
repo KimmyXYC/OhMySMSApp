@@ -927,7 +927,8 @@ function isCardOperating(cardId: number): boolean {
     <el-dialog
       v-model="nicknameDialogVisible"
       :title="nicknameDialogTitle"
-      width="400px"
+      width="min(400px, calc(100vw - 24px))"
+      class="esim-dialog"
       :close-on-click-modal="false"
     >
       <el-alert
@@ -962,7 +963,8 @@ function isCardOperating(cardId: number): boolean {
     <el-dialog
       v-model="addDialogVisible"
       title="添加 eSIM Profile"
-      width="560px"
+      width="min(560px, calc(100vw - 24px))"
+      class="esim-dialog"
       :close-on-click-modal="false"
       @closed="handleAddDialogClosed"
     >
@@ -1494,16 +1496,63 @@ function isCardOperating(cardId: number): boolean {
     &__back {
       display: inline-flex;
     }
+
+    &__content {
+      padding: 12px;
+    }
+
+    &__card-header {
+      margin-bottom: 12px;
+      gap: 10px;
+    }
+
+    &__card-title {
+      width: 100%;
+      flex-wrap: wrap;
+    }
+
+    &__card-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      width: 100%;
+    }
+
+    &__info-grid {
+      grid-template-columns: 1fr;
+      gap: 4px;
+    }
+
+    &__info-item {
+      padding: 6px 0;
+    }
+
+    &__info-value {
+      font-size: 13px;
+    }
   }
 
   .esim-profile {
     flex-direction: column;
 
     &__actions {
-      flex-direction: row;
-      align-items: flex-start;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
       width: 100%;
+
+      .el-button {
+        width: 100%;
+        margin-left: 0;
+      }
     }
+  }
+
+  .esim-card-item__edit-icon {
+    opacity: 1;
+  }
+
+  .esim-add-form__video {
+    min-height: 180px;
+    max-height: 40vh;
   }
 }
 </style>

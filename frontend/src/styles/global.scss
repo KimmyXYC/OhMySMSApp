@@ -59,6 +59,25 @@ a {
   padding: 20px;
   max-width: 1400px;
   margin: 0 auto;
+  width: 100%;
+}
+
+.text-break {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.text-ellipsis {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 767px) {
+  .page-container {
+    padding: 12px;
+  }
 }
 
 .fade-enter-active,

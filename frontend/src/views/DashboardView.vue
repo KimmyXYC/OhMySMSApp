@@ -141,6 +141,18 @@ async function handleDeleteModem(modem: ModemRow) {
   }
 }
 
+@media (max-width: 767px) {
+  .dashboard-header {
+    align-items: flex-start;
+    gap: 12px;
+    flex-direction: column;
+  }
+
+  .dashboard-stats :deep(.el-statistic__content) {
+    font-size: 20px;
+  }
+}
+
 .dashboard-stats {
   margin-bottom: 8px;
 }

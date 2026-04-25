@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useSimsStore } from '@/stores/sims'
@@ -12,6 +12,12 @@ const modemsStore = useModemsStore()
 
 const viewMode = ref<'table' | 'card'>('card')
 const loading = computed(() => simsStore.loading)
+const isMobile = ref(false)
+
+const handleResize = () => {
+  isMobile.value = window.innerWidth <= 767
+  if (isMobile.value) viewMode.value = 'card'
+}
 
 // 查找 SIM 所属的 Modem
 function findModem(sim: SimRow): ModemRow | undefined {
@@ -96,7 +102,13 @@ async function handleDeleteSim(sim: SimRow) {
 }
 
 onMounted(async () => {
+  handleResize()
+  window.addEventListener('resize', handleResize)
   await Promise.all([simsStore.fetchSims(), modemsStore.fetchModems()])
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', handleResize)
 })
 </script>
 
@@ -104,7 +116,7 @@ onMounted(async () => {
   <div class="page-container">
     <div class="sims-header">
       <h2>SIM 卡</h2>
-      <el-radio-group v-model="viewMode" size="small">
+      <el-radio-group v-if="!isMobile" v-model="viewMode" size="small">
         <el-radio-button value="card">卡片</el-radio-button>
         <el-radio-button value="table">表格</el-radio-button>
       </el-radio-group>
@@ -282,6 +294,7 @@ onMounted(async () => {
     display: flex;
     gap: 8px;
     align-items: center;
+    min-width: 0;
   }
 
   &__label {
@@ -309,5 +322,35 @@ onMounted(async () => {
 .mono {
   font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
   font-size: 12px;
+}
+
+@media (max-width: 767px) {
+  .sims-header {
+    align-items: flex-start;
+    gap: 12px;
+    flex-direction: column;
+  }
+
+  .sim-card__row {
+    align-items: flex-start;
+  }
+
+  .sim-card__row span:last-child,
+  .mono {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .sim-card__actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    text-align: initial;
+
+    .el-button {
+      width: 100%;
+      margin-left: 0;
+    }
+  }
 }
 </style>

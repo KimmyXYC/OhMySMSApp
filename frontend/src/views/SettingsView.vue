@@ -7,6 +7,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 const loading = ref(true)
 const saving = ref(false)
 const testSending = ref(false)
+const isMobile = ref(false)
 
 // Telegram 表单
 const hasToken = ref(false)
@@ -134,12 +135,13 @@ async function handleChangePassword() {
 }
 
 onMounted(() => {
+  isMobile.value = window.innerWidth <= 767
   loadSettings()
 })
 </script>
 
 <template>
-  <div class="page-container" style="max-width: 800px">
+  <div class="page-container settings-page">
     <h2 style="margin-bottom: 24px">设置</h2>
 
     <!-- Telegram 推送 -->
@@ -153,7 +155,7 @@ onMounted(() => {
         </div>
       </template>
 
-      <el-form label-width="120px" label-position="left">
+      <el-form :label-width="isMobile ? undefined : '120px'" :label-position="isMobile ? 'top' : 'left'">
         <el-form-item label="Bot Token">
           <el-input
             v-model="form.bot_token"
@@ -204,7 +206,7 @@ onMounted(() => {
         <span class="settings-card__title">账户</span>
       </template>
 
-      <el-form label-width="120px" label-position="left">
+      <el-form :label-width="isMobile ? undefined : '120px'" :label-position="isMobile ? 'top' : 'left'">
         <el-form-item label="当前密码">
           <el-input
             v-model="passwordForm.current_password"
@@ -252,6 +254,10 @@ onMounted(() => {
 </template>
 
 <style scoped lang="scss">
+.settings-page {
+  max-width: 800px;
+}
+
 .settings-card {
   border-radius: 12px;
 
@@ -267,7 +273,32 @@ onMounted(() => {
   }
 }
 
-.field-hint {
-  margin-left: 12px;
+@media (max-width: 767px) {
+  .settings-card__header {
+    align-items: flex-start;
+    gap: 8px;
+    flex-direction: column;
+  }
+
+  .settings-card :deep(.el-input),
+  .settings-card :deep(.el-input-number) {
+    width: 100% !important;
+    max-width: none !important;
+  }
+
+  .settings-card :deep(.el-form-item__content) {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-card :deep(.el-form-item__content .el-button) {
+    width: 100%;
+    margin-left: 0 !important;
+  }
+
+  .field-hint {
+    margin-top: 6px;
+    margin-left: 0 !important;
+  }
 }
 </style>
