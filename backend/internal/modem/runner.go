@@ -108,8 +108,9 @@ func (r *Runner) Run(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			r.handle(ctx, ev)
-			r.fanout(ev)
+			if r.handle(ctx, &ev) {
+				r.fanout(ev)
+			}
 		}
 	}
 }
@@ -142,17 +143,17 @@ func (r *Runner) sweepStaleModems(ctx context.Context) {
 }
 
 // handle 根据事件类型更新 DB。
-func (r *Runner) handle(ctx context.Context, ev Event) {
+func (r *Runner) handle(ctx context.Context, ev *Event) bool {
 	switch ev.Kind {
 	case EventModemAdded, EventModemUpdated:
 		state, ok := ev.Payload.(ModemState)
 		if !ok {
-			return
+			return false
 		}
 		id, err := r.store.UpsertModem(ctx, state)
 		if err != nil {
 			r.log.Error("upsert modem failed", "device", state.DeviceID, "err", err)
-			return
+			return false
 		}
 		r.setModemID(state.DeviceID, id)
 		if state.SIM != nil {
@@ -194,7 +195,7 @@ func (r *Runner) handle(ctx context.Context, ev Event) {
 	case EventSimUpdated:
 		sim, ok := ev.Payload.(SimState)
 		if !ok {
-			return
+			return false
 		}
 		modemID := r.getModemID(ctx, ev.DeviceID)
 		if simID, err := r.store.UpsertSim(ctx, sim, modemID); err != nil {
@@ -206,12 +207,12 @@ func (r *Runner) handle(ctx context.Context, ev Event) {
 	case EventSignalSampled:
 		sample, ok := ev.Payload.(SignalSample)
 		if !ok {
-			return
+			return false
 		}
 		modemID := r.getModemID(ctx, ev.DeviceID)
 		simID := r.getSimID(ctx, ev.DeviceID, modemID)
 		if modemID == 0 {
-			return // 还没见过该 modem
+			return false // 还没见过该 modem
 		}
 		if err := r.store.InsertSignalSample(ctx, modemID, simID, sample); err != nil {
 			r.log.Debug("insert signal sample failed", "err", err)
@@ -220,13 +221,17 @@ func (r *Runner) handle(ctx context.Context, ev Event) {
 	case EventSMSReceived:
 		rec, ok := ev.Payload.(SMSRecord)
 		if !ok {
-			return
+			return false
 		}
 		modemID := r.getModemID(ctx, ev.DeviceID)
 		simID := r.getSimID(ctx, ev.DeviceID, modemID)
-		if err := r.store.InsertSMS(ctx, rec, ev.DeviceID, modemID, simID); err != nil {
+		shouldNotify, err := r.store.InsertSMS(ctx, rec, ev.DeviceID, modemID, simID)
+		if err != nil {
 			r.log.Error("insert sms failed", "err", err)
-			return
+			return false
+		}
+		if !shouldNotify {
+			return false
 		}
 		r.log.Info("sms received",
 			"device", ev.DeviceID, "peer", rec.Peer,
@@ -235,13 +240,13 @@ func (r *Runner) handle(ctx context.Context, ev Event) {
 	case EventSMSStateChanged:
 		rec, ok := ev.Payload.(SMSRecord)
 		if !ok {
-			return
+			return false
 		}
 		modemID := r.getModemID(ctx, ev.DeviceID)
 		simID := r.getSimID(ctx, ev.DeviceID, modemID)
 		// 对于 outbound，我们在第一次出现时也要插入；InsertSMS 自身走
 		// source_key 去重，所以反复调用是幂等的。
-		if err := r.store.InsertSMS(ctx, rec, ev.DeviceID, modemID, simID); err != nil {
+		if _, err := r.store.InsertSMS(ctx, rec, ev.DeviceID, modemID, simID); err != nil {
 			r.log.Debug("upsert sms failed", "err", err)
 		}
 		// 单独再调 UpdateSMSState：即便 InsertSMS 的 ON CONFLICT 已经覆盖 state，
@@ -251,11 +256,11 @@ func (r *Runner) handle(ctx context.Context, ev Event) {
 	case EventUSSDStateChanged:
 		u, ok := ev.Payload.(USSDState)
 		if !ok {
-			return
+			return false
 		}
 		modemID := r.getModemID(ctx, ev.DeviceID)
 		if modemID == 0 {
-			return
+			return false
 		}
 		if u.LastRequest != "" {
 			_ = r.store.AppendUSSD(ctx, u.SessionID, "out", u.LastRequest, modemID)
@@ -272,6 +277,7 @@ func (r *Runner) handle(ctx context.Context, ev Event) {
 		_ = r.store.SetUSSDState(ctx, modemID, mapUSSDDBState(u.State))
 		r.log.Info("ussd state", "device", ev.DeviceID, "state", u.State)
 	}
+	return true
 }
 
 // fanout 非阻塞地把事件推给所有订阅者。

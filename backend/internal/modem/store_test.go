@@ -312,13 +312,13 @@ func TestInsertSMS_SourceKeyDedup(t *testing.T) {
 		Peer:      "+1",
 		Text:      "",
 	}
-	if err := s.InsertSMS(ctx, rec, "devA", modemID, simID); err != nil {
+	if _, err := s.InsertSMS(ctx, rec, "devA", modemID, simID); err != nil {
 		t.Fatal(err)
 	}
 	// 再来一次，state=received + body 填上
 	rec.State = "received"
 	rec.Text = "hi"
-	if err := s.InsertSMS(ctx, rec, "devA", modemID, simID); err != nil {
+	if _, err := s.InsertSMS(ctx, rec, "devA", modemID, simID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -349,7 +349,7 @@ func TestUpdateSMSState_BySourceKey(t *testing.T) {
 		ExtID: "/mm/sms/9", Direction: "outbound", State: "sending",
 		Peer: "+2", Text: "ok",
 	}
-	if err := s.InsertSMS(ctx, rec, "devX", modemID, simID); err != nil {
+	if _, err := s.InsertSMS(ctx, rec, "devX", modemID, simID); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.UpdateSMSState(ctx, "devX", "/mm/sms/9", "sent", ""); err != nil {

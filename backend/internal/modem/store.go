@@ -345,13 +345,14 @@ WHERE iccid = ?
 
 // InsertSMS 将一条 SMS 写入 db。去重键为 source_key（"mm:<deviceID>:<ext_id>"）。
 // 冲突时更新 state / body（若新 body 非空）/ ts_received / ts_sent / error_message。
+// 返回 shouldNotify=true 表示这是首次需要向上层广播的 inbound received 短信。
 // sim_id / modem_id 可以为 0（NULL）。
-func (s *Store) InsertSMS(ctx context.Context, rec SMSRecord, deviceID string, modemID, simID int64) error {
+func (s *Store) InsertSMS(ctx context.Context, rec SMSRecord, deviceID string, modemID, simID int64) (bool, error) {
 	if rec.ExtID == "" {
-		return errors.New("sms record missing ext_id")
+		return false, errors.New("sms record missing ext_id")
 	}
 	if deviceID == "" {
-		return errors.New("sms insert requires deviceID for source_key")
+		return false, errors.New("sms insert requires deviceID for source_key")
 	}
 	sourceKey := sourceKeyForSMS(deviceID, rec.ExtID)
 
@@ -390,9 +391,20 @@ ON CONFLICT(source_key) DO UPDATE SET
 		rec.ExtID, sourceKey, tsRecv, nowRFC3339(), tsSent,
 	)
 	if err != nil {
-		return fmt.Errorf("insert sms: %w", err)
+		return false, fmt.Errorf("insert sms: %w", err)
 	}
-	return nil
+	if rec.Direction == "inbound" && rec.State == "received" {
+		res, err := s.db.ExecContext(ctx, `
+UPDATE sms
+SET pushed_to_tg = 1
+WHERE source_key = ? AND pushed_to_tg = 0`, sourceKey)
+		if err != nil {
+			return false, fmt.Errorf("mark sms notified: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		return n == 1, nil
+	}
+	return false, nil
 }
 
 // UpdateSMSState 按 source_key 更新 state（以及可选的 error_message）。
