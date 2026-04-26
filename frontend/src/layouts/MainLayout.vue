@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuth } from '@/composables/useAuth'
 import { useWebSocket } from '@/composables/useWebSocket'
+import { useTheme, type ThemeMode } from '@/composables/useTheme'
 import type { WsStatus } from '@/composables/useWebSocket'
 import BackendSwitcher from '@/components/BackendSwitcher.vue'
 import {
@@ -21,10 +22,10 @@ import {
 
 const { logout } = useAuth()
 const { status } = useWebSocket()
+const { themeMode, isDark, setThemeMode, toggleTheme } = useTheme()
 const route = useRoute()
 
 const collapsed = ref(false)
-const isDark = ref(document.documentElement.classList.contains('dark'))
 const isMobile = ref(false)
 const mobileMenuOpen = ref(false)
 
@@ -64,9 +65,23 @@ const wsLabel = computed(() => {
   return map[status.value] || '已断开'
 })
 
-function toggleDark() {
-  isDark.value = !isDark.value
-  document.documentElement.classList.toggle('dark', isDark.value)
+const themeButtonTitle = computed(() => {
+  const modeLabel: Record<ThemeMode, string> = {
+    system: '跟随系统',
+    light: '浅色模式',
+    dark: '深色模式',
+  }
+  const resolvedLabel = isDark.value ? '深色' : '浅色'
+
+  return themeMode.value === 'system'
+    ? `当前主题：${modeLabel.system}（${resolvedLabel}）`
+    : `当前主题：${modeLabel[themeMode.value]}`
+})
+
+function handleThemeCommand(command: string | number | object) {
+  if (command === 'system' || command === 'light' || command === 'dark') {
+    setThemeMode(command)
+  }
 }
 
 function updateMobile() {
@@ -107,12 +122,12 @@ onUnmounted(() => {
     >
       <div class="main-layout__logo">
         <img src="/favicon.svg" alt="OhMySMS" width="32" height="32" />
-        <span v-show="!collapsed" class="main-layout__logo-text">OhMySMS</span>
+        <span v-show="!collapsed || isMobile" class="main-layout__logo-text">OhMySMS</span>
       </div>
 
       <el-menu
         :default-active="activeMenu"
-        :collapse="collapsed"
+        :collapse="!isMobile && collapsed"
         router
         class="main-layout__menu"
         @select="handleMenuSelect"
@@ -148,13 +163,37 @@ onUnmounted(() => {
           </el-tag>
           <span v-else class="ws-dot" :class="'ws-dot--' + status" />
 
-          <!-- 深浅色切换 -->
-          <el-button text @click="toggleDark">
-            <el-icon :size="18">
-              <Moon v-if="!isDark" />
-              <Sunny v-else />
-            </el-icon>
-          </el-button>
+          <!-- 主题切换 -->
+          <el-dropdown trigger="click" @command="handleThemeCommand">
+            <el-button text :title="themeButtonTitle" :aria-label="themeButtonTitle" @dblclick="toggleTheme">
+              <el-icon :size="18">
+                <Moon v-if="isDark" />
+                <Sunny v-else />
+              </el-icon>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="system">
+                  <span class="theme-menu-item">
+                    <span>跟随系统</span>
+                    <span v-if="themeMode === 'system'" class="theme-menu-item__check">✓</span>
+                  </span>
+                </el-dropdown-item>
+                <el-dropdown-item command="light">
+                  <span class="theme-menu-item">
+                    <span>浅色模式</span>
+                    <span v-if="themeMode === 'light'" class="theme-menu-item__check">✓</span>
+                  </span>
+                </el-dropdown-item>
+                <el-dropdown-item command="dark">
+                  <span class="theme-menu-item">
+                    <span>深色模式</span>
+                    <span v-if="themeMode === 'dark'" class="theme-menu-item__check">✓</span>
+                  </span>
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
 
           <!-- 登出 -->
           <el-button text @click="logout">
@@ -180,9 +219,13 @@ onUnmounted(() => {
   min-height: 100vh;
 
   &__aside {
-    background-color: var(--ohmysms-bg-aside);
-    border-right: 1px solid var(--el-border-color-light);
-    transition: width 0.3s;
+    background:
+      linear-gradient(180deg, var(--ohmysms-bg-aside) 0%, var(--ohmysms-bg-aside-soft) 100%);
+    border-right: 1px solid var(--ohmysms-sidebar-border);
+    transition:
+      width 0.3s,
+      transform 0.3s,
+      background-color 0.3s;
     overflow: hidden;
   }
 
@@ -193,6 +236,7 @@ onUnmounted(() => {
     padding: 16px;
     height: 56px;
     overflow: hidden;
+    border-bottom: 1px solid var(--ohmysms-sidebar-divider);
   }
 
   &__logo-text {
@@ -204,16 +248,68 @@ onUnmounted(() => {
   }
 
   &__menu {
+    --el-menu-bg-color: transparent;
+    --el-menu-hover-bg-color: var(--ohmysms-sidebar-hover-bg);
+    --el-menu-active-color: var(--ohmysms-sidebar-text-active);
+    --el-menu-text-color: var(--ohmysms-sidebar-text);
+
+    padding: 10px 8px;
     border-right: none;
+    background: transparent;
+    box-sizing: border-box;
+    width: 100%;
+
+    :deep(.el-menu-item) {
+      height: 42px;
+      margin: 3px 0;
+      border-radius: 9px;
+      color: var(--ohmysms-sidebar-text);
+      background-color: transparent;
+      line-height: 42px;
+      transition:
+        color 0.2s ease,
+        background-color 0.2s ease;
+    }
 
     // Override Element Plus menu active/hover states
     :deep(.el-menu-item.is-active) {
-      color: var(--ohmysms-primary);
-      background-color: var(--ohmysms-primary-light);
+      color: var(--ohmysms-sidebar-text-active);
+      background-color: var(--ohmysms-sidebar-active-bg);
     }
 
     :deep(.el-menu-item:hover) {
-      background-color: var(--ohmysms-primary-light-2);
+      color: var(--ohmysms-sidebar-text-active);
+      background-color: var(--ohmysms-sidebar-hover-bg);
+    }
+
+    :deep(.el-menu-item.is-active:hover) {
+      background-color: var(--ohmysms-sidebar-active-bg);
+    }
+
+    // el-menu--collapse is added to the el-menu root itself. In scoped CSS,
+    // keep this as a same-node selector so it compiles to
+    // .main-layout__menu.el-menu--collapse[data-v-*] instead of a descendant
+    // selector that never matches the root.
+    &.el-menu--collapse {
+      --el-menu-base-level-padding: 0px;
+
+      width: 100%;
+      padding-inline: 0;
+
+      :deep(.el-menu-item) {
+        justify-content: center;
+        width: 48px;
+        min-width: 0;
+        margin-inline: auto;
+        padding: 0 !important;
+      }
+
+      :deep(.el-menu-item .el-icon) {
+        display: inline-flex;
+        justify-content: center;
+        width: 100%;
+        margin-inline: 0 !important;
+      }
     }
   }
 
@@ -272,6 +368,19 @@ onUnmounted(() => {
   }
 }
 
+.theme-menu-item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 92px;
+  gap: 18px;
+
+  &__check {
+    color: var(--ohmysms-primary);
+    font-weight: 700;
+  }
+}
+
 @keyframes pulse {
   0%,
   100% {
@@ -290,7 +399,6 @@ onUnmounted(() => {
     height: 100vh;
     width: 220px !important;
     transform: translateX(-100%);
-    transition: transform 0.3s;
   }
 
   .main-layout__aside--mobile-open {
@@ -300,7 +408,7 @@ onUnmounted(() => {
   .main-layout__mobile-mask {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.35);
+    background: var(--ohmysms-overlay-mask);
     z-index: 999;
   }
 

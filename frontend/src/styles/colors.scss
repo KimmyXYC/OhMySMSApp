@@ -22,6 +22,18 @@
   --ohmysms-bg-card: #ffffff;
   --ohmysms-bg-header: #f8fafc;
   --ohmysms-bg-aside: #ffffff;
+  --ohmysms-bg-aside-soft: #f8fafc;
+
+  /* ─── 侧栏 ─── */
+  --ohmysms-sidebar-text: #475569;
+  --ohmysms-sidebar-text-active: #2563eb;
+  --ohmysms-sidebar-hover-bg: #eef6ff;
+  --ohmysms-sidebar-active-bg: #e6f1ff;
+  --ohmysms-sidebar-border: #e2e8f0;
+  --ohmysms-sidebar-divider: #eef2f7;
+
+  /* ─── 遮罩 ─── */
+  --ohmysms-overlay-mask: rgba(15, 23, 42, 0.35);
 
   /* ─── 信号条梯度 ─── */
   --ohmysms-signal-weak: #f87171;
@@ -72,33 +84,44 @@
 
 /* ─── 深色模式 ─── */
 html.dark {
-  --ohmysms-primary: #7dd3fc;
-  --ohmysms-primary-hover: #60a5fa;
-  --ohmysms-primary-active: #38bdf8;
-  --ohmysms-primary-light: rgba(125, 211, 252, 0.12);
-  --ohmysms-primary-light-2: rgba(125, 211, 252, 0.06);
+  /* Yacd-like 深蓝灰：页面更沉，表面轻微抬起，蓝色只作为清晰强调 */
+  --ohmysms-primary: #5dade8;
+  --ohmysms-primary-hover: #74bdf1;
+  --ohmysms-primary-active: #3f93d0;
+  --ohmysms-primary-light: rgba(93, 173, 232, 0.15);
+  --ohmysms-primary-light-2: rgba(93, 173, 232, 0.09);
 
-  --ohmysms-bg-page: #0f172a;
-  --ohmysms-bg-card: #1e293b;
-  --ohmysms-bg-header: #1e293b;
-  --ohmysms-bg-aside: #1e293b;
+  --ohmysms-bg-page: #0f141c;
+  --ohmysms-bg-card: #18212d;
+  --ohmysms-bg-header: #161e29;
+  --ohmysms-bg-aside: #121923;
+  --ohmysms-bg-aside-soft: #10161f;
 
-  --ohmysms-signal-strong: #7dd3fc;
-  --ohmysms-ws-connected: #7dd3fc;
+  --ohmysms-sidebar-text: #8fa1b8;
+  --ohmysms-sidebar-text-active: #d6ecff;
+  --ohmysms-sidebar-hover-bg: #182635;
+  --ohmysms-sidebar-active-bg: #1d3446;
+  --ohmysms-sidebar-border: #263343;
+  --ohmysms-sidebar-divider: rgba(143, 161, 184, 0.12);
 
-  --ohmysms-bubble-outbound: #1e3a5f;
-  --ohmysms-bubble-inbound: #334155;
+  --ohmysms-overlay-mask: rgba(5, 9, 15, 0.62);
 
-  --ohmysms-stat-gradient: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-  --ohmysms-stat-accent: #7dd3fc;
+  --ohmysms-signal-strong: #5dade8;
+  --ohmysms-ws-connected: #5dade8;
 
-  --ohmysms-text-primary: #e2e8f0;
-  --ohmysms-text-secondary: #94a3b8;
+  --ohmysms-bubble-outbound: #1d3b55;
+  --ohmysms-bubble-inbound: #222d3a;
 
-  --ohmysms-login-bg: linear-gradient(145deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+  --ohmysms-stat-gradient: linear-gradient(135deg, #1a2532 0%, #111a25 100%);
+  --ohmysms-stat-accent: #5dade8;
 
-  --ohmysms-online-dot: #7dd3fc;
-  --ohmysms-online-glow: rgba(125, 211, 252, 0.5);
+  --ohmysms-text-primary: #d7e0ea;
+  --ohmysms-text-secondary: #8fa1b8;
+
+  --ohmysms-login-bg: linear-gradient(145deg, #0f141c 0%, #18212d 48%, #101823 100%);
+
+  --ohmysms-online-dot: #5dade8;
+  --ohmysms-online-glow: rgba(93, 173, 232, 0.48);
 
   /* ─── eSIM vendor 色板 (dark) ─── */
   --ohmysms-vendor-5ber: #c4b5fd;
@@ -116,21 +139,21 @@ html.dark {
   --ohmysms-profile-disabled: #64748b;
   --ohmysms-profile-disabled-bg: rgba(100, 116, 139, 0.1);
 
-  /* Element Plus dark mode overrides for light-blue tint */
-  --el-bg-color: #1e293b;
-  --el-bg-color-page: #0f172a;
-  --el-bg-color-overlay: #1e293b;
-  --el-border-color: #334155;
-  --el-border-color-light: #334155;
-  --el-border-color-lighter: #2d3a4e;
-  --el-border-color-extra-light: #253346;
-  --el-fill-color: #334155;
-  --el-fill-color-light: #2d3a4e;
-  --el-fill-color-lighter: #253346;
-  --el-fill-color-extra-light: #1e293b;
-  --el-text-color-primary: #e2e8f0;
-  --el-text-color-regular: #cbd5e1;
-  --el-text-color-secondary: #94a3b8;
-  --el-text-color-placeholder: #64748b;
-  --el-text-color-disabled: #475569;
+  /* Element Plus dark mode overrides for Yacd-like blue-gray surfaces */
+  --el-bg-color: #18212d;
+  --el-bg-color-page: #0f141c;
+  --el-bg-color-overlay: #1b2633;
+  --el-border-color: #2b394a;
+  --el-border-color-light: #263343;
+  --el-border-color-lighter: #223041;
+  --el-border-color-extra-light: #1d2938;
+  --el-fill-color: #243244;
+  --el-fill-color-light: #202c3b;
+  --el-fill-color-lighter: #1a2532;
+  --el-fill-color-extra-light: #151e2a;
+  --el-text-color-primary: #d7e0ea;
+  --el-text-color-regular: #bdc9d8;
+  --el-text-color-secondary: #8fa1b8;
+  --el-text-color-placeholder: #66778d;
+  --el-text-color-disabled: #536275;
 }

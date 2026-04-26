@@ -4,6 +4,20 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      ;(() => {
+        try {
+          const mode = localStorage.getItem('ohmysms_theme_mode') || 'system'
+          const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+          const shouldUseDark = mode === 'dark' || (mode !== 'light' && prefersDark)
+
+          document.documentElement.classList.toggle('dark', shouldUseDark)
+          document.documentElement.style.colorScheme = shouldUseDark ? 'dark' : 'light'
+        } catch {
+          // Keep the default light theme if system preference detection is unavailable.
+        }
+      })()
+    </script>
     <title>OhMySMS — 短信管理</title>
   </head>
   <body>

@@ -42,4 +42,5 @@ backend/config.yaml
 
 # Build artifacts
 /deploy/build/
+/backend/build
 coverage.out
