@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Store 封装 ohmysmsapp 对 modem/sim/sms/ussd 相关表的所有写入与查询。
@@ -186,6 +187,60 @@ func (s *Store) SetModemNickname(ctx context.Context, deviceID, nickname string)
 		`UPDATE modems SET nickname = ? WHERE device_id = ?`, arg, deviceID)
 	if err != nil {
 		return fmt.Errorf("set modem nickname: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+const maxMSISDNOverrideRunes = 32
+
+func validateMSISDNOverride(msisdn string) (string, error) {
+	raw := msisdn
+	msisdn = strings.TrimSpace(msisdn)
+	if msisdn == "" {
+		return "", nil
+	}
+	if runeCount(msisdn) > maxMSISDNOverrideRunes {
+		return "", ErrInvalidMSISDNOverride
+	}
+	for _, r := range raw {
+		if unicode.IsControl(r) {
+			return "", ErrInvalidMSISDNOverride
+		}
+	}
+	return normalizeMSISDN(msisdn), nil
+}
+
+func runeCount(s string) int {
+	n := 0
+	for range s {
+		n++
+	}
+	return n
+}
+
+// SetSIMMSISDNOverride 设置 SIM 的本地显示号码覆盖值。
+// 空字符串或全空白会清空覆盖值（写 NULL）；非空值会按 modem normalizeMSISDN 规整。
+// 该值只影响本地展示，不写入 SIM 卡，也不会被 UpsertSim 的硬件 OwnNumbers 覆盖。
+// 若 simID 不存在，返回 sql.ErrNoRows。
+func (s *Store) SetSIMMSISDNOverride(ctx context.Context, simID int64, msisdn string) error {
+	msisdn, err := validateMSISDNOverride(msisdn)
+	if err != nil {
+		return err
+	}
+	var arg any
+	if msisdn == "" {
+		arg = nil
+	} else {
+		arg = msisdn
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE sims SET msisdn_override = ? WHERE id = ?`, arg, simID)
+	if err != nil {
+		return fmt.Errorf("set sim msisdn override: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {

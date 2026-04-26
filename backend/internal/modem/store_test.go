@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -294,6 +295,104 @@ func TestUpsertSim_EmptyICCIDSkipped(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("expected 0 sim rows, got %d", n)
+	}
+}
+
+func TestSIMMSISDNOverride_SetClearFallbackAndNotFound(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	modemID, _ := s.UpsertModem(ctx, ModemState{DeviceID: "dev-msisdn", IMEI: "910000000000001"})
+	simID, err := s.UpsertSim(ctx, SimState{ICCID: "8986900000000000099", MSISDN: "+10000000001"}, modemID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 没有覆盖值时，对外 msisdn 回退到硬件 OwnNumbers。
+	row, err := s.GetSIMByID(ctx, simID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.MSISDN == nil || *row.MSISDN != "+10000000001" {
+		t.Fatalf("expected hardware msisdn fallback, got %#v", row.MSISDN)
+	}
+	if row.MSISDNOverride != nil {
+		t.Fatalf("expected no override, got %q", *row.MSISDNOverride)
+	}
+
+	// 设置覆盖值会 normalize，并让对外 msisdn 使用覆盖值。
+	if err := s.SetSIMMSISDNOverride(ctx, simID, " 491701234567 "); err != nil {
+		t.Fatal(err)
+	}
+	row, err = s.GetSIMByID(ctx, simID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.MSISDN == nil || *row.MSISDN != "+491701234567" {
+		t.Fatalf("expected display override msisdn, got %#v", row.MSISDN)
+	}
+	if row.MSISDNOverride == nil || *row.MSISDNOverride != "+491701234567" {
+		t.Fatalf("expected override persisted, got %#v", row.MSISDNOverride)
+	}
+
+	// 后续硬件 OwnNumbers 更新不应覆盖本地覆盖值，但硬件值本身仍保存在 sims.msisdn。
+	if _, err := s.UpsertSim(ctx, SimState{ICCID: "8986900000000000099", MSISDN: "+10000000002"}, modemID); err != nil {
+		t.Fatal(err)
+	}
+	row, err = s.GetSIMByID(ctx, simID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.MSISDN == nil || *row.MSISDN != "+491701234567" {
+		t.Fatalf("expected override to remain display value, got %#v", row.MSISDN)
+	}
+	var hardware string
+	if err := s.db.QueryRowContext(ctx, `SELECT msisdn FROM sims WHERE id = ?`, simID).Scan(&hardware); err != nil {
+		t.Fatal(err)
+	}
+	if hardware != "+10000000002" {
+		t.Fatalf("expected hardware msisdn updated, got %q", hardware)
+	}
+
+	// 全空白清空覆盖值，对外 msisdn 回退到最新硬件值。
+	if err := s.SetSIMMSISDNOverride(ctx, simID, "   "); err != nil {
+		t.Fatal(err)
+	}
+	row, err = s.GetSIMByID(ctx, simID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.MSISDNOverride != nil {
+		t.Fatalf("expected override cleared, got %q", *row.MSISDNOverride)
+	}
+	if row.MSISDN == nil || *row.MSISDN != "+10000000002" {
+		t.Fatalf("expected fallback to latest hardware msisdn, got %#v", row.MSISDN)
+	}
+
+	if err := s.SetSIMMSISDNOverride(ctx, simID+999, "+123"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected sql.ErrNoRows for missing sim, got %v", err)
+	}
+
+	invalidInputs := map[string]string{
+		"too long":     strings.Repeat("1", 33),
+		"control char": "+12\x003",
+	}
+	for name, input := range invalidInputs {
+		if err := s.SetSIMMSISDNOverride(ctx, simID, input); !errors.Is(err, ErrInvalidMSISDNOverride) {
+			t.Fatalf("%s: expected ErrInvalidMSISDNOverride, got %v", name, err)
+		}
+	}
+
+	// 防御历史/绕过写入的空串脏数据：对外 msisdn 仍应回退到硬件值。
+	if _, err := s.db.ExecContext(ctx, `UPDATE sims SET msisdn_override = '' WHERE id = ?`, simID); err != nil {
+		t.Fatal(err)
+	}
+	row, err = s.GetSIMByID(ctx, simID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.MSISDN == nil || *row.MSISDN != "+10000000002" {
+		t.Fatalf("expected empty override to fallback to latest hardware msisdn, got %#v", row.MSISDN)
 	}
 }
 

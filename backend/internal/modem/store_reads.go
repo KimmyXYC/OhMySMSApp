@@ -36,8 +36,8 @@ type ModemRow struct {
 	FirstSeenAt  string   `json:"first_seen_at"`
 	LastSeenAt   string   `json:"last_seen_at"`
 
-	SIM    *SimRow       `json:"sim,omitempty"`
-	Signal *SignalRow    `json:"signal,omitempty"`
+	SIM    *SimRow    `json:"sim,omitempty"`
+	Signal *SignalRow `json:"signal,omitempty"`
 }
 
 // SimRow 对应 sims 表。
@@ -46,6 +46,7 @@ type SimRow struct {
 	ICCID               string  `json:"iccid"`
 	IMSI                *string `json:"imsi"`
 	MSISDN              *string `json:"msisdn"`
+	MSISDNOverride      *string `json:"msisdn_override,omitempty"`
 	OperatorID          *string `json:"operator_id"`
 	OperatorName        *string `json:"operator_name"`
 	CardType            string  `json:"card_type"`
@@ -104,13 +105,13 @@ type SignalRow struct {
 
 // ThreadRow 聚合短信会话一行。
 type ThreadRow struct {
-	Peer      string  `json:"peer"`
-	SimID     *int64  `json:"sim_id"`
-	LastText  string  `json:"last_text"`
-	LastTime  string  `json:"last_time"`
-	Count     int     `json:"count"`
-	Direction string  `json:"direction"`
-	State     string  `json:"state"`
+	Peer      string `json:"peer"`
+	SimID     *int64 `json:"sim_id"`
+	LastText  string `json:"last_text"`
+	LastTime  string `json:"last_time"`
+	Count     int    `json:"count"`
+	Direction string `json:"direction"`
+	State     string `json:"state"`
 }
 
 // SMSFilter 列表过滤器。
@@ -130,7 +131,7 @@ type SMSFilter struct {
 const modemCols = `id, device_id, dbus_path, manufacturer, model, firmware, imei, plugin,
 primary_port, at_ports, qmi_port, mbim_port, usb_path, present, nickname, first_seen_at, last_seen_at`
 
-const simCols = `id, iccid, imsi, msisdn, operator_id, operator_name, card_type,
+const simCols = `id, iccid, imsi, COALESCE(NULLIF(msisdn_override, ''), msisdn) AS msisdn, msisdn_override, operator_id, operator_name, card_type,
 esim_card_id, esim_profile_active, esim_profile_nickname, first_seen_at, last_seen_at`
 
 func scanModem(row interface {
@@ -160,7 +161,7 @@ func scanSim(row interface {
 	var s SimRow
 	var activeInt int64
 	err := row.Scan(
-		&s.ID, &s.ICCID, &s.IMSI, &s.MSISDN, &s.OperatorID, &s.OperatorName,
+		&s.ID, &s.ICCID, &s.IMSI, &s.MSISDN, &s.MSISDNOverride, &s.OperatorID, &s.OperatorName,
 		&s.CardType, &s.ESIMCardID, &activeInt, &s.ESIMProfileNickname,
 		&s.FirstSeenAt, &s.LastSeenAt,
 	)

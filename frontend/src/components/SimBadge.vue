@@ -6,6 +6,14 @@ defineProps<{
   compact?: boolean
 }>()
 
+function hasMsisdnOverride(sim: SimRow): boolean {
+  return !!sim.msisdn_override
+}
+
+function msisdnOverrideTip(sim: SimRow): string {
+  return `号码来源：ohmysmsapp 本地覆盖${sim.msisdn_override ? `（${sim.msisdn_override}）` : ''}`
+}
+
 function cardTypeLabel(type: string): string {
   switch (type) {
     case 'psim':
@@ -45,7 +53,16 @@ function cardTypeTagType(type: string): 'primary' | 'success' | 'warning' {
     <template v-if="!compact">
       <div class="sim-badge__row">
         <span class="sim-badge__label">号码</span>
-        <span class="sim-badge__value">{{ sim.msisdn ?? '未知' }}</span>
+        <span class="sim-badge__value sim-badge__value--with-tag">
+          <span>{{ sim.msisdn ?? '未知' }}</span>
+          <el-tooltip
+            v-if="hasMsisdnOverride(sim)"
+            :content="msisdnOverrideTip(sim)"
+            placement="top"
+          >
+            <el-tag size="small" type="info" effect="plain">本地覆盖</el-tag>
+          </el-tooltip>
+        </span>
       </div>
       <div class="sim-badge__row">
         <span class="sim-badge__label">ICCID</span>
@@ -59,7 +76,14 @@ function cardTypeTagType(type: string): 'primary' | 'success' | 'warning' {
 
     <template v-else>
       <span class="sim-badge__compact-info">
-        {{ sim.msisdn ?? sim.iccid.slice(-6) }}
+        <span>{{ sim.msisdn ?? sim.iccid.slice(-6) }}</span>
+        <el-tooltip
+          v-if="hasMsisdnOverride(sim)"
+          :content="msisdnOverrideTip(sim)"
+          placement="top"
+        >
+          <el-tag size="small" type="info" effect="plain" class="sim-badge__local-tag">本地</el-tag>
+        </el-tooltip>
         <span v-if="sim.operator_name" style="margin-left: 4px; opacity: 0.6">{{ sim.operator_name }}</span>
       </span>
     </template>
@@ -77,6 +101,7 @@ function cardTypeTagType(type: string): 'primary' | 'success' | 'warning' {
     display: flex;
     align-items: center;
     gap: 8px;
+    flex-wrap: wrap;
     margin-bottom: 6px;
   }
 
@@ -98,6 +123,14 @@ function cardTypeTagType(type: string): 'primary' | 'success' | 'warning' {
 
   &__value {
     color: var(--el-text-color-regular);
+    min-width: 0;
+
+    &--with-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
 
     &--mono {
       font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
@@ -110,8 +143,17 @@ function cardTypeTagType(type: string): 'primary' | 'success' | 'warning' {
   }
 
   &__compact-info {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
     font-size: 12px;
     color: var(--el-text-color-regular);
+    min-width: 0;
+  }
+
+  &__local-tag {
+    flex: 0 0 auto;
   }
 }
 </style>

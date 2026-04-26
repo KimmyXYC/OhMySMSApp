@@ -112,7 +112,10 @@ export interface SimRow {
   id: number
   iccid: string
   imsi: string | null
+  /** 最终展示号码：本地覆盖优先，否则为硬件/运营商自动获取值 */
   msisdn: string | null
+  /** ohmysmsapp 本地手动覆盖号码；null 表示未覆盖 */
+  msisdn_override?: string | null
   operator_id: string | null
   operator_name: string | null
   card_type: 'psim' | 'sticker_esim' | 'embedded_esim'

@@ -14,6 +14,17 @@ const viewMode = ref<'table' | 'card'>('card')
 const loading = computed(() => simsStore.loading)
 const isMobile = ref(false)
 
+const msisdnDialogVisible = ref(false)
+const msisdnDialogSaving = ref(false)
+const msisdnEditingSim = ref<SimRow | null>(null)
+const msisdnInput = ref('')
+
+const msisdnDialogTitle = computed(() => {
+  const sim = msisdnEditingSim.value
+  if (!sim) return '编辑号码'
+  return hasMsisdnOverride(sim) ? '编辑本地显示号码' : '设置本地显示号码'
+})
+
 const handleResize = () => {
   isMobile.value = window.innerWidth <= 767
   if (isMobile.value) viewMode.value = 'card'
@@ -47,6 +58,59 @@ function cardTypeTagType(type: string): 'primary' | 'success' | 'warning' {
       return 'warning'
     default:
       return 'primary'
+  }
+}
+
+function hasMsisdnOverride(sim: SimRow): boolean {
+  return !!sim.msisdn_override
+}
+
+function openMsisdnDialog(sim: SimRow) {
+  msisdnEditingSim.value = sim
+  // 只在已有本地覆盖时回填覆盖值；自动获取号码仅作为提示，避免误保存成覆盖。
+  msisdnInput.value = sim.msisdn_override ?? ''
+  msisdnDialogVisible.value = true
+}
+
+function closeMsisdnDialog() {
+  if (msisdnDialogSaving.value) return
+  msisdnDialogVisible.value = false
+}
+
+function resetMsisdnDialog() {
+  msisdnEditingSim.value = null
+  msisdnInput.value = ''
+}
+
+async function refreshAfterMsisdnChange() {
+  await Promise.all([simsStore.fetchSims(), modemsStore.fetchModems()])
+
+  const errors = [simsStore.error, modemsStore.error].filter(Boolean)
+  if (errors.length > 0) {
+    throw new Error(errors.join('；'))
+  }
+}
+
+async function saveMsisdnOverride() {
+  const sim = msisdnEditingSim.value
+  if (!sim) return
+
+  const value = msisdnInput.value.trim()
+  msisdnDialogSaving.value = true
+  try {
+    await simsStore.updateSimMsisdn(sim.id, value)
+    ElMessage.success(value ? '本地显示号码已保存' : '已清除号码覆盖，将回退自动获取值')
+    msisdnDialogVisible.value = false
+
+    try {
+      await refreshAfterMsisdnChange()
+    } catch (refreshError: any) {
+      ElMessage.warning(refreshError.message || '号码已保存，但刷新 SIM/模块列表失败')
+    }
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || e.message || '保存号码失败')
+  } finally {
+    msisdnDialogSaving.value = false
   }
 }
 
@@ -147,7 +211,12 @@ onUnmounted(() => {
             <div class="sim-card__info">
               <div class="sim-card__row">
                 <span class="sim-card__label">号码</span>
-                <span>{{ sim.msisdn ?? '未知' }}</span>
+                <span class="sim-card__number">
+                  <span>{{ sim.msisdn ?? '未知' }}</span>
+                  <el-tag v-if="hasMsisdnOverride(sim)" size="small" type="info" effect="plain">
+                    本地覆盖
+                  </el-tag>
+                </span>
               </div>
               <div class="sim-card__row">
                 <span class="sim-card__label">ICCID</span>
@@ -168,6 +237,9 @@ onUnmounted(() => {
             </div>
 
             <div class="sim-card__actions">
+              <el-button size="small" type="primary" text @click="openMsisdnDialog(sim)">
+                编辑号码
+              </el-button>
               <el-button size="small" type="primary" text @click="goToSms(sim)">
                 查看短信
               </el-button>
@@ -209,7 +281,12 @@ onUnmounted(() => {
         </el-table-column>
         <el-table-column prop="msisdn" label="号码" width="140">
           <template #default="{ row }">
-            {{ row.msisdn ?? '—' }}
+            <div class="sim-number-cell">
+              <span>{{ row.msisdn ?? '—' }}</span>
+              <el-tag v-if="hasMsisdnOverride(row)" size="small" type="info" effect="plain">
+                本地
+              </el-tag>
+            </div>
           </template>
         </el-table-column>
         <el-table-column prop="card_type" label="类型" width="120">
@@ -229,8 +306,11 @@ onUnmounted(() => {
             <span v-else>—</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="150" fixed="right">
+        <el-table-column label="操作" width="200" fixed="right">
           <template #default="{ row }">
+            <el-button size="small" text type="primary" @click="openMsisdnDialog(row)">
+              号码
+            </el-button>
             <el-button size="small" text type="primary" @click="goToSms(row)">
               短信
             </el-button>
@@ -252,6 +332,54 @@ onUnmounted(() => {
         description="暂无 SIM 卡"
       />
     </div>
+
+    <el-dialog
+      v-model="msisdnDialogVisible"
+      :title="msisdnDialogTitle"
+      width="min(520px, calc(100vw - 24px))"
+      :close-on-click-modal="false"
+      @closed="resetMsisdnDialog"
+    >
+      <el-alert
+        title="这是 ohmysmsapp 的本地显示号码，仅用于本系统页面展示；不会写入 SIM 卡，也不会修改运营商资料。"
+        type="info"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 16px"
+      />
+
+      <el-form label-position="top">
+        <el-form-item label="本地显示号码">
+          <el-input
+            v-model="msisdnInput"
+            placeholder="输入本地显示号码；留空保存即清除本地覆盖"
+            clearable
+            maxlength="32"
+            @keyup.enter="saveMsisdnOverride"
+          />
+        </el-form-item>
+      </el-form>
+
+      <div class="msisdn-dialog__hint">
+        <p>保存非空内容后，该号码会优先作为 SIM 的展示号码。</p>
+        <p v-if="msisdnEditingSim?.msisdn && !hasMsisdnOverride(msisdnEditingSim)">
+          自动获取号码：<span class="mono">{{ msisdnEditingSim.msisdn }}</span>（仅作参考，不会自动保存为本地覆盖）
+        </p>
+        <p>留空并保存表示清除本地覆盖，并回退到后端自动获取的号码（如有）。</p>
+        <p v-if="msisdnEditingSim" class="mono">
+          ICCID: {{ msisdnEditingSim.iccid }}
+        </p>
+      </div>
+
+      <template #footer>
+        <div class="msisdn-dialog__footer">
+          <el-button @click="closeMsisdnDialog">取消</el-button>
+          <el-button type="primary" :loading="msisdnDialogSaving" @click="saveMsisdnOverride">
+            保存
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -297,6 +425,14 @@ onUnmounted(() => {
     min-width: 0;
   }
 
+  &__number {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+
   &__label {
     color: var(--el-text-color-secondary);
     min-width: 44px;
@@ -314,8 +450,44 @@ onUnmounted(() => {
   }
 
   &__actions {
+    display: flex;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 4px 8px;
     margin-top: 12px;
     text-align: right;
+
+    .el-button {
+      margin-left: 0;
+    }
+  }
+}
+
+.sim-number-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.msisdn-dialog__hint {
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+
+  p {
+    margin: 4px 0;
+  }
+}
+
+.msisdn-dialog__footer {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+
+  .el-button {
+    margin-left: 0;
   }
 }
 
@@ -350,6 +522,15 @@ onUnmounted(() => {
     .el-button {
       width: 100%;
       margin-left: 0;
+    }
+  }
+
+  .msisdn-dialog__footer {
+    display: grid;
+    grid-template-columns: 1fr;
+
+    .el-button {
+      width: 100%;
     }
   }
 }

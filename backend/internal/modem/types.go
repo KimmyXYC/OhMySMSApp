@@ -13,8 +13,9 @@ import (
 )
 
 var (
-	ErrModemInUse = errors.New("modem is online and cannot be deleted")
-	ErrSIMInUse   = errors.New("sim is currently in use and cannot be deleted")
+	ErrModemInUse            = errors.New("modem is online and cannot be deleted")
+	ErrSIMInUse              = errors.New("sim is currently in use and cannot be deleted")
+	ErrInvalidMSISDNOverride = errors.New("invalid sim msisdn override")
 )
 
 // EventKind 事件类型枚举。
