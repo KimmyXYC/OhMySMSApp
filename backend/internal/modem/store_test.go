@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/db"
 )
@@ -312,14 +313,22 @@ func TestInsertSMS_SourceKeyDedup(t *testing.T) {
 		Peer:      "+1",
 		Text:      "",
 	}
-	if _, err := s.InsertSMS(ctx, rec, "devA", modemID, simID); err != nil {
+	shouldNotify, err := s.InsertSMS(ctx, rec, "devA", modemID, simID)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if shouldNotify {
+		t.Fatal("receiving sms should not notify")
 	}
 	// 再来一次，state=received + body 填上
 	rec.State = "received"
 	rec.Text = "hi"
-	if _, err := s.InsertSMS(ctx, rec, "devA", modemID, simID); err != nil {
+	shouldNotify, err = s.InsertSMS(ctx, rec, "devA", modemID, simID)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !shouldNotify {
+		t.Fatal("first received inbound should notify")
 	}
 
 	var count int
@@ -335,6 +344,13 @@ func TestInsertSMS_SourceKeyDedup(t *testing.T) {
 	}
 	if state != "received" || body != "hi" {
 		t.Errorf("expected state=received body=hi, got state=%q body=%q", state, body)
+	}
+	var pushed int
+	if err := s.db.QueryRowContext(ctx, `SELECT pushed_to_tg FROM sms`).Scan(&pushed); err != nil {
+		t.Fatal(err)
+	}
+	if pushed != 1 {
+		t.Errorf("expected pushed_to_tg=1 after notify, got %d", pushed)
 	}
 }
 
@@ -361,5 +377,233 @@ func TestUpdateSMSState_BySourceKey(t *testing.T) {
 	}
 	if got != "sent" {
 		t.Errorf("expected state=sent, got %q", got)
+	}
+}
+
+func TestInsertSMS_ContentDedupSuppressesAlreadyPushed(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	modemID, _ := s.UpsertModem(ctx, ModemState{DeviceID: "dev-content", IMEI: "900000000000003"})
+	simID, _ := s.UpsertSim(ctx, SimState{ICCID: "8986900000000000003"}, modemID)
+	ts := time.Date(2026, 4, 23, 14, 20, 35, 0, time.UTC)
+
+	rec := SMSRecord{
+		ExtID:     "/org/freedesktop/ModemManager1/SMS/1",
+		Direction: "inbound",
+		State:     "received",
+		Peer:      "+49",
+		Text:      "same body",
+		Timestamp: ts,
+	}
+	shouldNotify, err := s.InsertSMS(ctx, rec, "dev-content", modemID, simID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !shouldNotify {
+		t.Fatal("first received inbound should notify")
+	}
+
+	rec.ExtID = "/org/freedesktop/ModemManager1/SMS/99"
+	shouldNotify, err = s.InsertSMS(ctx, rec, "dev-content", modemID, simID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shouldNotify {
+		t.Fatal("content duplicate with pushed_to_tg=1 must not notify")
+	}
+
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sms`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("expected one deduped row, got %d", count)
+	}
+	var extID, sourceKey string
+	var pushed int
+	if err := s.db.QueryRowContext(ctx, `SELECT ext_id, source_key, pushed_to_tg FROM sms`).Scan(&extID, &sourceKey, &pushed); err != nil {
+		t.Fatal(err)
+	}
+	if extID != rec.ExtID {
+		t.Errorf("ext_id not updated: got %q want %q", extID, rec.ExtID)
+	}
+	wantSource := sourceKeyForSMS("dev-content", rec.ExtID)
+	if sourceKey != wantSource {
+		t.Errorf("source_key not updated: got %q want %q", sourceKey, wantSource)
+	}
+	if pushed != 1 {
+		t.Errorf("pushed_to_tg should stay 1, got %d", pushed)
+	}
+}
+
+func TestInsertSMS_ContentDedupBestEffortWithoutTimestamp(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	modemID, _ := s.UpsertModem(ctx, ModemState{DeviceID: "dev-o2", IMEI: "900000000000004"})
+	simID, _ := s.UpsertSim(ctx, SimState{ICCID: "8986900000000000004"}, modemID)
+	rec := SMSRecord{
+		ExtID:     "/mm/sms/10",
+		Direction: "inbound",
+		State:     "received",
+		Peer:      "o2",
+		Text:      "Ihr Code lautet 123456",
+	}
+	if shouldNotify, err := s.InsertSMS(ctx, rec, "dev-o2", modemID, simID); err != nil {
+		t.Fatal(err)
+	} else if !shouldNotify {
+		t.Fatal("first no-timestamp sms should notify")
+	}
+
+	rec.ExtID = "/mm/sms/11"
+	if shouldNotify, err := s.InsertSMS(ctx, rec, "dev-o2", modemID, simID); err != nil {
+		t.Fatal(err)
+	} else if shouldNotify {
+		t.Fatal("same sim/peer/body without timestamp should best-effort dedup and suppress")
+	}
+
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sms`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("expected best-effort dedup to one row, got %d", count)
+	}
+}
+
+func TestInsertSMS_ContentDedupWithTimestampWithoutCachedIdentity(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	modemID, _ := s.UpsertModem(ctx, ModemState{DeviceID: "dev-race", IMEI: "900000000000007"})
+	simID, _ := s.UpsertSim(ctx, SimState{ICCID: "8986900000000000007"}, modemID)
+	ts := time.Date(2026, 4, 23, 14, 20, 35, 0, time.UTC)
+	rec := SMSRecord{ExtID: "/mm/sms/40", Direction: "inbound", State: "received", Peer: "o2 Preise", Text: "same timestamp body", Timestamp: ts}
+	if err := s.UpsertSMS(ctx, rec, "dev-race", modemID, simID); err != nil {
+		t.Fatal(err)
+	}
+
+	// 模拟启动/重枚举竞态：SMSReceived 早于 Runner modem/sim cache，就以 0 身份入库。
+	rec.ExtID = "/mm/sms/41"
+	shouldNotify, err := s.InsertSMS(ctx, rec, "dev-race", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shouldNotify {
+		t.Fatal("timestamp+peer+body global fallback should suppress historical duplicate without cached identity")
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sms`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("expected one deduped row, got %d", count)
+	}
+}
+
+func TestInsertSMS_ContentDedupMergesSourceKeyTempRow(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	modemID, _ := s.UpsertModem(ctx, ModemState{DeviceID: "dev-merge", IMEI: "900000000000008"})
+	simID, _ := s.UpsertSim(ctx, SimState{ICCID: "8986900000000000008"}, modemID)
+	ts := time.Date(2026, 4, 23, 14, 20, 35, 0, time.UTC)
+	history := SMSRecord{ExtID: "/mm/sms/old", Direction: "inbound", State: "received", Peer: "o2 Preise", Text: "same historical body", Timestamp: ts}
+	if err := s.UpsertSMS(ctx, history, "dev-merge", modemID, simID); err != nil {
+		t.Fatal(err)
+	}
+
+	// 新 path 先以中间态出现并插入 source_key 临时行。
+	tmp := SMSRecord{ExtID: "/mm/sms/new", Direction: "inbound", State: "receiving", Peer: "o2 Preise"}
+	if err := s.UpsertSMS(ctx, tmp, "dev-merge", modemID, simID); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sms`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("setup expected two rows, got %d", count)
+	}
+
+	// 后续完整 received/body 到达，应合并到历史内容行并删除临时 source_key 行。
+	dup := history
+	dup.ExtID = tmp.ExtID
+	shouldNotify, err := s.InsertSMS(ctx, dup, "dev-merge", modemID, simID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shouldNotify {
+		t.Fatal("merged historical duplicate should not notify")
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sms`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("expected temp row merged/deleted, got %d rows", count)
+	}
+	var extID string
+	if err := s.db.QueryRowContext(ctx, `SELECT ext_id FROM sms`).Scan(&extID); err != nil {
+		t.Fatal(err)
+	}
+	if extID != tmp.ExtID {
+		t.Fatalf("expected merged row ext_id updated to %q, got %q", tmp.ExtID, extID)
+	}
+}
+
+func TestInsertSMS_DuplicateBeforeNotifyCanNotifyOnce(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	modemID, _ := s.UpsertModem(ctx, ModemState{DeviceID: "dev-late", IMEI: "900000000000005"})
+	simID, _ := s.UpsertSim(ctx, SimState{ICCID: "8986900000000000005"}, modemID)
+	rec := SMSRecord{ExtID: "/mm/sms/20", Direction: "inbound", State: "received", Peer: "+1", Text: "late"}
+	if _, err := s.db.ExecContext(ctx, `
+INSERT INTO sms(sim_id, modem_id, direction, state, peer, body, ext_id, source_key, ts_created, pushed_to_tg)
+VALUES (?, ?, 'inbound', 'received', ?, ?, ?, ?, ?, 0)`,
+		simID, modemID, rec.Peer, rec.Text, rec.ExtID, sourceKeyForSMS("dev-late", rec.ExtID), nowRFC3339()); err != nil {
+		t.Fatal(err)
+	}
+
+	shouldNotify, err := s.InsertSMS(ctx, rec, "dev-late", modemID, simID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !shouldNotify {
+		t.Fatal("existing unpushed received inbound should notify once")
+	}
+	shouldNotify, err = s.InsertSMS(ctx, rec, "dev-late", modemID, simID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shouldNotify {
+		t.Fatal("second duplicate after pushed_to_tg=1 should not notify")
+	}
+}
+
+func TestUpsertSMS_SuppressesHistoricalReceivedNotification(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	modemID, _ := s.UpsertModem(ctx, ModemState{DeviceID: "dev-initial", IMEI: "900000000000006"})
+	simID, _ := s.UpsertSim(ctx, SimState{ICCID: "8986900000000000006"}, modemID)
+	rec := SMSRecord{ExtID: "/mm/sms/30", Direction: "inbound", State: "received", Peer: "+1", Text: "initial history"}
+	if err := s.UpsertSMS(ctx, rec, "dev-initial", modemID, simID); err != nil {
+		t.Fatal(err)
+	}
+	var pushed int
+	if err := s.db.QueryRowContext(ctx, `SELECT pushed_to_tg FROM sms`).Scan(&pushed); err != nil {
+		t.Fatal(err)
+	}
+	if pushed != 1 {
+		t.Fatalf("UpsertSMS should mark historical received as already handled, pushed_to_tg=%d", pushed)
+	}
+	shouldNotify, err := s.InsertSMS(ctx, rec, "dev-initial", modemID, simID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shouldNotify {
+		t.Fatal("InsertSMS must not notify historical received already suppressed by UpsertSMS")
 	}
 }

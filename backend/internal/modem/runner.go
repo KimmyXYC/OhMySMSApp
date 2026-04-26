@@ -108,7 +108,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			if r.handle(ctx, &ev) {
+			if r.handle(ctx, ev) {
 				r.fanout(ev)
 			}
 		}
@@ -142,8 +142,23 @@ func (r *Runner) sweepStaleModems(ctx context.Context) {
 	}
 }
 
-// handle 根据事件类型更新 DB。
-func (r *Runner) handle(ctx context.Context, ev *Event) bool {
+// handle 根据事件类型更新 DB，并返回该事件是否允许继续扇出给订阅者。
+// EventSMSReceived 只有在 DB 成功确认 shouldNotify 后才 fanout；写库失败或重复短信
+// 均禁止扇出，避免 Telegram/WS 收到重复的新短信通知。
+func (r *Runner) handle(ctx context.Context, raw any) bool {
+	var ev Event
+	switch x := raw.(type) {
+	case Event:
+		ev = x
+	case *Event:
+		if x == nil {
+			return false
+		}
+		ev = *x
+	default:
+		return false
+	}
+
 	switch ev.Kind {
 	case EventModemAdded, EventModemUpdated:
 		state, ok := ev.Payload.(ModemState)
@@ -153,7 +168,7 @@ func (r *Runner) handle(ctx context.Context, ev *Event) bool {
 		id, err := r.store.UpsertModem(ctx, state)
 		if err != nil {
 			r.log.Error("upsert modem failed", "device", state.DeviceID, "err", err)
-			return false
+			return true
 		}
 		r.setModemID(state.DeviceID, id)
 		if state.SIM != nil {
@@ -212,7 +227,7 @@ func (r *Runner) handle(ctx context.Context, ev *Event) bool {
 		modemID := r.getModemID(ctx, ev.DeviceID)
 		simID := r.getSimID(ctx, ev.DeviceID, modemID)
 		if modemID == 0 {
-			return false // 还没见过该 modem
+			return true // 还没见过该 modem
 		}
 		if err := r.store.InsertSignalSample(ctx, modemID, simID, sample); err != nil {
 			r.log.Debug("insert signal sample failed", "err", err)
@@ -231,11 +246,13 @@ func (r *Runner) handle(ctx context.Context, ev *Event) bool {
 			return false
 		}
 		if !shouldNotify {
+			r.log.Debug("sms received duplicate suppressed", "device", ev.DeviceID, "peer", rec.Peer)
 			return false
 		}
 		r.log.Info("sms received",
 			"device", ev.DeviceID, "peer", rec.Peer,
 			"len", len(rec.Text))
+		return true
 
 	case EventSMSStateChanged:
 		rec, ok := ev.Payload.(SMSRecord)
@@ -246,7 +263,7 @@ func (r *Runner) handle(ctx context.Context, ev *Event) bool {
 		simID := r.getSimID(ctx, ev.DeviceID, modemID)
 		// 对于 outbound，我们在第一次出现时也要插入；InsertSMS 自身走
 		// source_key 去重，所以反复调用是幂等的。
-		if _, err := r.store.InsertSMS(ctx, rec, ev.DeviceID, modemID, simID); err != nil {
+		if err := r.store.UpsertSMS(ctx, rec, ev.DeviceID, modemID, simID); err != nil {
 			r.log.Debug("upsert sms failed", "err", err)
 		}
 		// 单独再调 UpdateSMSState：即便 InsertSMS 的 ON CONFLICT 已经覆盖 state，
@@ -260,7 +277,7 @@ func (r *Runner) handle(ctx context.Context, ev *Event) bool {
 		}
 		modemID := r.getModemID(ctx, ev.DeviceID)
 		if modemID == 0 {
-			return false
+			return true
 		}
 		if u.LastRequest != "" {
 			_ = r.store.AppendUSSD(ctx, u.SessionID, "out", u.LastRequest, modemID)

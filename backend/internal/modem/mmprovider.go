@@ -30,7 +30,17 @@ type MMProvider struct {
 	modems  map[string]*modemEntry                 // key = DeviceID
 	byPath  map[dbus.ObjectPath]string             // DBus path → DeviceID（反查）
 	smsSubs map[dbus.ObjectPath][]dbus.MatchOption // 每个 SMS path 对应的 match options（用于 RemoveMatchSignal）
+	smsSeen map[dbus.ObjectPath]smsObserved
 }
+
+type smsObserved struct {
+	State     string
+	Direction string
+	LiveAdded bool // true 表示该 SMS path 来自运行期 Messaging.Added，而非 initial reconcile
+	Notified  bool // true 表示已对该 path 发过 EventSMSReceived
+}
+
+const smsLiveHistoryGrace = 2 * time.Minute
 
 // modemEntry 是一个 modem 的运行时完整状态。
 type modemEntry struct {
@@ -56,6 +66,7 @@ func NewMMProvider(log *slog.Logger, eventBufSize int) *MMProvider {
 		modems:  make(map[string]*modemEntry),
 		byPath:  make(map[dbus.ObjectPath]string),
 		smsSubs: make(map[dbus.ObjectPath][]dbus.MatchOption),
+		smsSeen: make(map[dbus.ObjectPath]smsObserved),
 	}
 }
 
@@ -344,7 +355,8 @@ func (p *MMProvider) initialReconcile(ctx context.Context) error {
 		}
 	}
 	// 对每个已订阅 modem，通过 Messaging.List 拿到它的 SMS paths；
-	// 直接调 onSmsAppearedForModem 路径（和 live Messaging.Added 走同一入口），
+	// 直接调 onSmsAppearedForModem 路径，但标记为 initial reconcile，
+	// 已经处于 received/inbound 的历史短信只落库/发状态事件，不触发新短信通知。
 	// 它会加锁登记 SMSPaths，订阅 PropertiesChanged，然后读一次并 emit 事件。
 	p.mu.RLock()
 	modemsSnap := make([]struct {
@@ -368,7 +380,7 @@ func (p *MMProvider) initialReconcile(ctx context.Context) error {
 			continue
 		}
 		for _, sp := range smsPaths {
-			p.onSmsAppearedForModem(m.DevID, sp)
+			p.onSmsAppearedForModem(m.DevID, sp, false)
 		}
 	}
 	return nil
@@ -432,7 +444,7 @@ func (p *MMProvider) handleSignal(ctx context.Context, sig *dbus.Signal) {
 			p.log.Warn("sms added for unknown modem path", "path", sig.Path)
 			return
 		}
-		p.onSmsAppearedForModem(deviceID, smsPath)
+		p.onSmsAppearedForModem(deviceID, smsPath, true)
 		// 当 received=true 时，state 可能还是 RECEIVING；依赖 PropertiesChanged → RECEIVED。
 
 	case ifaceMessaging + ".Deleted":
@@ -505,6 +517,11 @@ func (p *MMProvider) onModemAdded(ctx context.Context, path dbus.ObjectPath,
 	// 若 DBus path 变更了，先清理旧的 match 订阅。
 	if exists && entry.State.DBusPath != "" && entry.State.DBusPath != string(path) {
 		p.removeModemMatches(entry)
+		for sp := range entry.SMSPaths {
+			p.removeSmsMatchLocked(sp)
+			delete(p.smsSeen, sp)
+			delete(entry.SMSPaths, sp)
+		}
 		delete(p.byPath, dbus.ObjectPath(entry.State.DBusPath))
 	}
 	entry.State = state
@@ -593,6 +610,7 @@ func (p *MMProvider) onModemRemoved(path dbus.ObjectPath) {
 		// 清理该 modem 下所有 SMS 订阅
 		for sp := range entry.SMSPaths {
 			p.removeSmsMatchLocked(sp)
+			delete(p.smsSeen, sp)
 		}
 	}
 	delete(p.modems, deviceID)
@@ -804,20 +822,43 @@ func (p *MMProvider) onUSSDPropsChanged(entry *modemEntry, deviceID string,
 //  2. AddMatchSignal 订阅该 SMS 的 PropertiesChanged（在 conn 上；锁内做因为
 //     godbus 的 AddMatchSignal 内部也是同步调用，性能可接受）。
 //  3. 写入 smsSubs + modemEntry.SMSPaths，确保后续 deviceIDForSMSPath 能反查到。
-//  4. 出锁后读取 SMS 属性并 emit 初始事件（REC'D → EventSMSReceived，否则 StateChanged）。
+//  4. 出锁后读取 SMS 属性并建立 baseline。initial reconcile 的历史 received/inbound
+//     只发 StateChanged；live Messaging.Added 在首次或后续读到
+//     received/inbound 时发 SMSReceived。
 //
 // 这个路径同时供 initial reconcile + live Messaging.Added 使用，
 // 不再需要额外的"先预填 SMSPaths 再调 onSmsAppeared"特殊流程。
-func (p *MMProvider) onSmsAppearedForModem(deviceID string, path dbus.ObjectPath) {
+func (p *MMProvider) onSmsAppearedForModem(deviceID string, path dbus.ObjectPath, liveAdded bool) {
 	if deviceID == "" {
 		p.log.Warn("onSmsAppearedForModem with empty deviceID", "path", path)
 		return
 	}
 	p.mu.Lock()
+	if p.smsSeen == nil {
+		p.smsSeen = make(map[dbus.ObjectPath]smsObserved)
+	}
 	if _, exists := p.smsSubs[path]; exists {
 		// 已订阅，仅确保 SMSPaths 反查表上也有登记（修复 reload 边缘情况）。
 		if entry, ok := p.modems[deviceID]; ok {
 			entry.SMSPaths[path] = true
+		}
+		if liveAdded {
+			conn := p.conn
+			prev := p.smsSeen[path]
+			prev.LiveAdded = true
+			p.smsSeen[path] = prev
+			p.mu.Unlock()
+			if conn == nil {
+				return
+			}
+			if rec, err := p.readSMS(conn, path); err == nil {
+				kind := classifySMSObservation(prev, rec, true)
+				p.mu.Lock()
+				p.smsSeen[path] = observeSMS(prev, rec, kind)
+				p.mu.Unlock()
+				p.emit(Event{Kind: kind, DeviceID: deviceID, Payload: rec, At: time.Now()})
+			}
+			return
 		}
 		p.mu.Unlock()
 		return
@@ -845,15 +886,30 @@ func (p *MMProvider) onSmsAppearedForModem(deviceID string, path dbus.ObjectPath
 	p.mu.Unlock()
 
 	// 出锁读 SMS。读失败也没关系——后续 PropertiesChanged 会再触发。
+	// 对 live Messaging.Added，即使首次读取失败，也要留下 LiveAdded marker；
+	// 后续第一次读到 received/inbound 时仍应补发 EventSMSReceived，避免漏真实新短信。
 	if rec, err := p.readSMS(conn, path); err == nil {
-		kind := EventSMSStateChanged
-		if rec.State == "received" && rec.Direction == "inbound" {
-			kind = EventSMSReceived
+		prev := smsObserved{LiveAdded: liveAdded}
+		kind := classifySMSObservation(prev, rec, liveAdded)
+		p.mu.Lock()
+		if p.smsSeen == nil {
+			p.smsSeen = make(map[dbus.ObjectPath]smsObserved)
 		}
+		p.smsSeen[path] = observeSMS(prev, rec, kind)
+		p.mu.Unlock()
 		p.emit(Event{
 			Kind: kind, DeviceID: deviceID,
 			Payload: rec, At: time.Now(),
 		})
+	} else if liveAdded {
+		p.mu.Lock()
+		if p.smsSeen == nil {
+			p.smsSeen = make(map[dbus.ObjectPath]smsObserved)
+		}
+		prev := p.smsSeen[path]
+		prev.LiveAdded = true
+		p.smsSeen[path] = prev
+		p.mu.Unlock()
 	}
 }
 
@@ -861,6 +917,7 @@ func (p *MMProvider) onSmsAppearedForModem(deviceID string, path dbus.ObjectPath
 func (p *MMProvider) onSmsRemoved(path dbus.ObjectPath) {
 	p.mu.Lock()
 	p.removeSmsMatchLocked(path)
+	delete(p.smsSeen, path)
 	deviceID := p.deviceIDForSMSPathLocked(path)
 	if entry, ok := p.modems[deviceID]; ok {
 		delete(entry.SMSPaths, path)
@@ -878,19 +935,91 @@ func (p *MMProvider) onSmsPropsChanged(path dbus.ObjectPath, changed map[string]
 	if !subscribed || conn == nil {
 		return
 	}
+	p.mu.RLock()
+	prev := p.smsSeen[path]
+	p.mu.RUnlock()
 	// 重新完整读一次最稳；changed 不一定带完整内容。
 	rec, err := p.readSMS(conn, path)
 	if err != nil {
 		return
 	}
 	deviceID := p.deviceIDForSMSPath(path)
-	kind := EventSMSStateChanged
-	if rec.State == "received" && rec.Direction == "inbound" {
-		// 只有新转到 received 时才报 received；这里偷懒每次转发都等同状态变更，
-		// 由下游 store 去重（UNIQUE(sim_id, ext_id)）。
-		kind = EventSMSReceived
+	kind := classifySMSObservation(prev, rec, false)
+	p.mu.Lock()
+	if p.smsSeen == nil {
+		p.smsSeen = make(map[dbus.ObjectPath]smsObserved)
 	}
+	p.smsSeen[path] = observeSMS(prev, rec, kind)
+	p.mu.Unlock()
 	p.emit(Event{Kind: kind, DeviceID: deviceID, Payload: rec, At: time.Now()})
+}
+
+func classifySMSObservation(prev smsObserved, rec SMSRecord, appearedLive bool) EventKind {
+	if rec.State != "received" || rec.Direction != "inbound" {
+		return EventSMSStateChanged
+	}
+	if prev.Notified {
+		return EventSMSStateChanged
+	}
+	// ModemManager 在 modem 重枚举/恢复时会对 SIM/ME 中已有历史短信再次发
+	// Messaging.Added(received=true)。如果短信中心时间明显早于当前时间，不能当作
+	// 刚到的新短信通知；真实新短信的 SMSC timestamp 通常只会和当前时间相差数秒。
+	if (appearedLive || prev.LiveAdded) && isHistoricalReceivedSMS(rec, time.Now()) {
+		return EventSMSStateChanged
+	}
+	// 运行期 Messaging.Added 可能首次读取时就已经是 received/inbound；
+	// 也可能首次读取失败或还在 receiving，后续 PropertiesChanged 才读到 received。
+	if appearedLive || prev.LiveAdded {
+		return EventSMSReceived
+	}
+	// 保留原有语义：已观察到 inbound 且从非 received 过渡到 received 时，
+	// 这是本进程期间完成接收的短信，应通知。
+	if prev.Direction == "inbound" && prev.State != "" && prev.State != "received" {
+		return EventSMSReceived
+	}
+	return EventSMSStateChanged
+}
+
+func isHistoricalReceivedSMS(rec SMSRecord, now time.Time) bool {
+	if rec.Timestamp.IsZero() {
+		return false
+	}
+	return now.Sub(rec.Timestamp) > smsLiveHistoryGrace
+}
+
+func observeSMS(prev smsObserved, rec SMSRecord, kind EventKind) smsObserved {
+	handledReceived := prev.Notified || kind == EventSMSReceived ||
+		(rec.State == "received" && rec.Direction == "inbound" && !prev.LiveAdded)
+	return smsObserved{
+		State:     rec.State,
+		Direction: rec.Direction,
+		LiveAdded: prev.LiveAdded,
+		Notified:  handledReceived,
+	}
+}
+
+func parseMMTimestamp(raw string) (time.Time, error) {
+	s := strings.TrimSpace(raw)
+	layouts := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02T15:04:05-07",
+		"2006-01-02T15:04:05.999999999-07",
+		"2006-01-02T15:04:05-0700",
+		"2006-01-02T15:04:05.999999999-0700",
+	}
+	var lastErr error
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, nil
+		} else {
+			lastErr = err
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("empty timestamp")
+	}
+	return time.Time{}, lastErr
 }
 
 // -------------------- 内部：读对象属性 --------------------
@@ -963,7 +1092,7 @@ func (p *MMProvider) readSMS(conn *dbus.Conn, path dbus.ObjectPath) (SMSRecord, 
 		}
 	}
 	if ts := getString(props, "Timestamp"); ts != "" {
-		if t, err := time.Parse(time.RFC3339, ts); err == nil {
+		if t, err := parseMMTimestamp(ts); err == nil {
 			rec.Timestamp = t
 		}
 	}
@@ -1058,6 +1187,9 @@ func (p *MMProvider) cleanupAllMatches() {
 	}
 	for path := range p.smsSubs {
 		p.removeSmsMatchLocked(path)
+	}
+	for path := range p.smsSeen {
+		delete(p.smsSeen, path)
 	}
 }
 

@@ -343,11 +343,31 @@ WHERE iccid = ?
 	return simID, nil
 }
 
-// InsertSMS 将一条 SMS 写入 db。去重键为 source_key（"mm:<deviceID>:<ext_id>"）。
-// 冲突时更新 state / body（若新 body 非空）/ ts_received / ts_sent / error_message。
-// 返回 shouldNotify=true 表示这是首次需要向上层广播的 inbound received 短信。
+// InsertSMS 将一条 SMS 写入 db，并返回本次是否应向通知订阅者扇出新短信。
+//
+// 主去重键为 source_key（"mm:<deviceID>:<ext_id>"）。此外，为修复
+// ModemManager 重启/重枚举后 SMS path 漂移导致的历史短信重复，对 inbound +
+// received + body 非空的短信，会先按 SIM/Modem + peer + body + ts_received
+// （可用时）查找既有历史行；命中后更新该行的 ext_id/source_key/state/body/timestamps，
+// 不再插入新行。
+//
+// pushed_to_tg 用作通知门禁：首次看到 received inbound 时原子置 1 并返回 true；
+// 已置 1 的重复事件返回 false。调用方只有在返回 true 且 err=nil 时才应 fanout。
 // sim_id / modem_id 可以为 0（NULL）。
 func (s *Store) InsertSMS(ctx context.Context, rec SMSRecord, deviceID string, modemID, simID int64) (bool, error) {
+	return s.insertSMS(ctx, rec, deviceID, modemID, simID, true)
+}
+
+// UpsertSMS 写入/更新 SMS，但不返回通知许可。
+// 用于 EventSMSStateChanged（包括 initial reconcile 的历史短信入库）。如果写入的
+// 已经是 inbound received，则同时把 pushed_to_tg 置为 1，语义上表示该历史短信的
+// 新短信通知已被处理/抑制，避免后续同 source_key 的 live 事件再补推。
+func (s *Store) UpsertSMS(ctx context.Context, rec SMSRecord, deviceID string, modemID, simID int64) error {
+	_, err := s.insertSMS(ctx, rec, deviceID, modemID, simID, false)
+	return err
+}
+
+func (s *Store) insertSMS(ctx context.Context, rec SMSRecord, deviceID string, modemID, simID int64, reserveNotify bool) (bool, error) {
 	if rec.ExtID == "" {
 		return false, errors.New("sms record missing ext_id")
 	}
@@ -377,34 +397,284 @@ func (s *Store) InsertSMS(ctx context.Context, rec SMSRecord, deviceID string, m
 		tsSent = nowRFC3339()
 	}
 
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	sourceTarget, sourceOK, err := findSMSBySourceKey(ctx, tx, sourceKey)
+	if err != nil {
+		return false, fmt.Errorf("find sms by source_key: %w", err)
+	}
+	contentTarget, contentOK, err := findContentDuplicateSMS(ctx, tx, rec, simID, modemID, tsRecv)
+	if err != nil {
+		return false, fmt.Errorf("find duplicate sms: %w", err)
+	}
+	if contentOK && (!sourceOK || contentTarget.ID != sourceTarget.ID) {
+		// 完整 received/body 到达前，live 历史短信可能已经以同 source_key 的
+		// 中间态插入过临时行。此时应合并到更稳定的内容重复行，并删除临时行，
+		// 否则同一历史短信仍会留下重复 DB 行。
+		if sourceOK {
+			if err := deleteSMSRow(ctx, tx, sourceTarget.ID); err != nil {
+				return false, err
+			}
+		}
+		if err := updateSMSRow(ctx, tx, contentTarget.ID, rec, simArg, modemArg, sourceKey, tsRecv, tsSent); err != nil {
+			return false, err
+		}
+		if smsNotificationCandidate(rec) {
+			if err := suppressSMSNotification(ctx, tx, contentTarget.ID); err != nil {
+				return false, err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+
+	target, ok := sourceTarget, sourceOK
+	if !ok && contentOK {
+		target, ok = contentTarget, true
+	}
+
+	if ok {
+		if err := updateSMSRow(ctx, tx, target.ID, rec, simArg, modemArg, sourceKey, tsRecv, tsSent); err != nil {
+			return false, err
+		}
+		shouldNotify := false
+		if reserveNotify && !target.ContentMatched {
+			shouldNotify, err = reserveSMSNotification(ctx, tx, target.ID, target.PushedToTG, rec)
+			if err != nil {
+				return false, err
+			}
+		} else if smsNotificationCandidate(rec) {
+			if err := suppressSMSNotification(ctx, tx, target.ID); err != nil {
+				return false, err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return false, err
+		}
+		return shouldNotify, nil
+	}
+
+	shouldNotify := reserveNotify && smsNotificationCandidate(rec)
+	pushed := 0
+	if shouldNotify || (!reserveNotify && smsNotificationCandidate(rec)) {
+		pushed = 1
+	}
+	_, err = tx.ExecContext(ctx, `
 INSERT INTO sms(sim_id, modem_id, direction, state, peer, body, ext_id, source_key,
-                ts_received, ts_created, ts_sent)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(source_key) DO UPDATE SET
-    state       = excluded.state,
-    body        = CASE WHEN excluded.body <> '' THEN excluded.body ELSE sms.body END,
-    ts_received = COALESCE(excluded.ts_received, sms.ts_received),
-    ts_sent     = COALESCE(excluded.ts_sent, sms.ts_sent)
+                ts_received, ts_created, ts_sent, pushed_to_tg)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `,
 		simArg, modemArg, rec.Direction, rec.State, rec.Peer, rec.Text,
-		rec.ExtID, sourceKey, tsRecv, nowRFC3339(), tsSent,
+		rec.ExtID, sourceKey, tsRecv, nowRFC3339(), tsSent, pushed,
 	)
 	if err != nil {
 		return false, fmt.Errorf("insert sms: %w", err)
 	}
-	if rec.Direction == "inbound" && rec.State == "received" {
-		res, err := s.db.ExecContext(ctx, `
-UPDATE sms
-SET pushed_to_tg = 1
-WHERE source_key = ? AND pushed_to_tg = 0`, sourceKey)
-		if err != nil {
-			return false, fmt.Errorf("mark sms notified: %w", err)
-		}
-		n, _ := res.RowsAffected()
-		return n == 1, nil
+	if err := tx.Commit(); err != nil {
+		return false, err
 	}
-	return false, nil
+	return shouldNotify, nil
+}
+
+type smsInsertTarget struct {
+	ID             int64
+	PushedToTG     bool
+	SourceKey      string
+	ContentMatched bool
+}
+
+func findSMSBySourceKey(ctx context.Context, tx *sql.Tx, sourceKey string) (smsInsertTarget, bool, error) {
+	var t smsInsertTarget
+	var pushed int
+	err := tx.QueryRowContext(ctx,
+		`SELECT id, pushed_to_tg, source_key FROM sms WHERE source_key = ?`, sourceKey,
+	).Scan(&t.ID, &pushed, &t.SourceKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return smsInsertTarget{}, false, nil
+	}
+	if err != nil {
+		return smsInsertTarget{}, false, err
+	}
+	t.PushedToTG = pushed != 0
+	return t, true, nil
+}
+
+func findContentDuplicateSMS(ctx context.Context, tx *sql.Tx, rec SMSRecord, simID, modemID int64, tsRecv any) (smsInsertTarget, bool, error) {
+	if rec.Direction != "inbound" || rec.State != "received" || rec.Text == "" {
+		return smsInsertTarget{}, false, nil
+	}
+	ts, hasTS := tsRecv.(string)
+	if hasTS && ts == "" {
+		hasTS = false
+	}
+
+	type identity struct {
+		col string
+		id  int64
+	}
+	ids := make([]identity, 0, 2)
+	if simID > 0 {
+		ids = append(ids, identity{col: "sim_id", id: simID})
+	}
+	if modemID > 0 {
+		ids = append(ids, identity{col: "modem_id", id: modemID})
+	}
+	for _, ident := range ids {
+		if hasTS {
+			if target, ok, err := queryContentDuplicateSMS(ctx, tx, ident.col, ident.id, rec.Peer, rec.Text, "ts_received = ?", ts); err != nil || ok {
+				return target, ok, err
+			}
+			// 有 SMSC timestamp 时不回退匹配旧 NULL ts_received 行，避免未来真实
+			// 相同文案短信（营销/验证码模板）被历史记录误杀。部署后 initial reconcile
+			// 会把当前 MM path 的历史行补齐 ts_received，之后 path 漂移可按 timestamp 命中。
+			continue
+		}
+		if target, ok, err := queryContentDuplicateSMS(ctx, tx, ident.col, ident.id, rec.Peer, rec.Text, "1=1"); err != nil || ok {
+			return target, ok, err
+		}
+	}
+	if hasTS {
+		// 启动/重枚举竞态下，SMSReceived 可能早于 Runner 的 modem/sim cache 更新，
+		// 此时 simID/modemID 可能为 0。SMSC timestamp + peer + body 已足够稳定，
+		// 用作最后兜底，避免历史短信因身份缓存未就绪而重复入库/通知。
+		if target, ok, err := queryContentDuplicateSMSGlobal(ctx, tx, rec.Peer, rec.Text, "ts_received = ?", ts); err != nil || ok {
+			return target, ok, err
+		}
+	}
+	return smsInsertTarget{}, false, nil
+}
+
+func queryContentDuplicateSMS(ctx context.Context, tx *sql.Tx, identityCol string, identityID int64, peer, body, tsWhere string, tsArgs ...any) (smsInsertTarget, bool, error) {
+	args := []any{identityID, peer, body}
+	args = append(args, tsArgs...)
+	q := fmt.Sprintf(`
+SELECT id, pushed_to_tg FROM sms
+WHERE %s = ?
+  AND direction = 'inbound'
+  AND state = 'received'
+  AND peer = ?
+  AND body = ?
+  AND %s
+ORDER BY id DESC
+LIMIT 1`, identityCol, tsWhere)
+	var t smsInsertTarget
+	var pushed int
+	err := tx.QueryRowContext(ctx, q, args...).Scan(&t.ID, &pushed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return smsInsertTarget{}, false, nil
+	}
+	if err != nil {
+		return smsInsertTarget{}, false, err
+	}
+	t.PushedToTG = pushed != 0
+	t.ContentMatched = true
+	_ = tx.QueryRowContext(ctx, `SELECT source_key FROM sms WHERE id = ?`, t.ID).Scan(&t.SourceKey)
+	return t, true, nil
+}
+
+func queryContentDuplicateSMSGlobal(ctx context.Context, tx *sql.Tx, peer, body, tsWhere string, tsArgs ...any) (smsInsertTarget, bool, error) {
+	args := []any{peer, body}
+	args = append(args, tsArgs...)
+	q := fmt.Sprintf(`
+SELECT id, pushed_to_tg FROM sms
+WHERE direction = 'inbound'
+  AND state = 'received'
+  AND peer = ?
+  AND body = ?
+  AND %s
+ORDER BY id DESC
+LIMIT 1`, tsWhere)
+	var t smsInsertTarget
+	var pushed int
+	err := tx.QueryRowContext(ctx, q, args...).Scan(&t.ID, &pushed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return smsInsertTarget{}, false, nil
+	}
+	if err != nil {
+		return smsInsertTarget{}, false, err
+	}
+	t.PushedToTG = pushed != 0
+	t.ContentMatched = true
+	_ = tx.QueryRowContext(ctx, `SELECT source_key FROM sms WHERE id = ?`, t.ID).Scan(&t.SourceKey)
+	return t, true, nil
+}
+
+func updateSMSRow(ctx context.Context, tx *sql.Tx, id int64, rec SMSRecord, simArg, modemArg any, sourceKey string, tsRecv, tsSent any) error {
+	newSourceKey := sourceKey
+	var conflictID int64
+	err := tx.QueryRowContext(ctx,
+		`SELECT id FROM sms WHERE source_key = ? AND id <> ?`, sourceKey, id,
+	).Scan(&conflictID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("check sms source_key conflict: %w", err)
+	}
+	if conflictID != 0 {
+		// 罕见但必须避免 UNIQUE 冲突：保留原 source_key，内容去重下次仍能命中。
+		var current sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT source_key FROM sms WHERE id = ?`, id).Scan(&current); err != nil {
+			return fmt.Errorf("load sms source_key: %w", err)
+		}
+		newSourceKey = current.String
+	}
+
+	_, err = tx.ExecContext(ctx, `
+UPDATE sms SET
+    sim_id      = COALESCE(?, sim_id),
+    modem_id    = COALESCE(?, modem_id),
+    direction   = ?,
+    state       = ?,
+    peer        = ?,
+    body        = CASE WHEN ? <> '' THEN ? ELSE body END,
+    ext_id      = ?,
+    source_key  = ?,
+    ts_received = COALESCE(?, ts_received),
+    ts_sent     = COALESCE(?, ts_sent)
+WHERE id = ?`,
+		simArg, modemArg, rec.Direction, rec.State, rec.Peer,
+		rec.Text, rec.Text, rec.ExtID, newSourceKey, tsRecv, tsSent, id,
+	)
+	if err != nil {
+		return fmt.Errorf("update sms: %w", err)
+	}
+	return nil
+}
+
+func deleteSMSRow(ctx context.Context, tx *sql.Tx, id int64) error {
+	_, err := tx.ExecContext(ctx, `DELETE FROM sms WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete duplicate sms row: %w", err)
+	}
+	return nil
+}
+
+func reserveSMSNotification(ctx context.Context, tx *sql.Tx, id int64, alreadyPushed bool, rec SMSRecord) (bool, error) {
+	if !smsNotificationCandidate(rec) || alreadyPushed {
+		return false, nil
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE sms SET pushed_to_tg = 1 WHERE id = ? AND pushed_to_tg = 0`, id)
+	if err != nil {
+		return false, fmt.Errorf("reserve sms notification: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+func suppressSMSNotification(ctx context.Context, tx *sql.Tx, id int64) error {
+	_, err := tx.ExecContext(ctx, `UPDATE sms SET pushed_to_tg = 1 WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("suppress sms notification: %w", err)
+	}
+	return nil
+}
+
+func smsNotificationCandidate(rec SMSRecord) bool {
+	return rec.Direction == "inbound" && rec.State == "received"
 }
 
 // UpdateSMSState 按 source_key 更新 state（以及可选的 error_message）。
