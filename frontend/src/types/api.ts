@@ -259,6 +259,8 @@ export interface SignalSample {
 export interface TelegramSettings {
   has_token: boolean
   chat_id: number
+  push_chat_id: number
+  push_message_thread_id: number
   push_sms: boolean
   source: string
 }
@@ -266,6 +268,8 @@ export interface TelegramSettings {
 export interface TelegramPutRequest {
   bot_token?: string
   chat_id?: number
+  push_chat_id?: number
+  push_message_thread_id?: number
   push_sms?: boolean
 }
 

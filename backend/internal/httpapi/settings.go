@@ -3,7 +3,7 @@
 // 存储策略：
 //   - 运行时的 telegram 配置优先以 settings 表中 key="telegram" 为准；
 //     没有则回退到 config.yaml 的值（只读）。
-//   - GET 响应 *绝不* 回显 bot_token。只回 has_token/chat_id/push_sms。
+//   - GET 响应 *绝不* 回显 bot_token。只回 has_token/chat_id/push_chat_id/push_message_thread_id/push_sms。
 //   - PUT 可以更新任一字段；bot_token="" 视为不修改（除非带 clear:true）。
 package httpapi
 
@@ -21,17 +21,21 @@ import (
 )
 
 type telegramDTO struct {
-	HasToken bool   `json:"has_token"`
-	ChatID   int64  `json:"chat_id"`
-	PushSMS  bool   `json:"push_sms"`
-	Source   string `json:"source"` // "config" | "settings"
+	HasToken            bool   `json:"has_token"`
+	ChatID              int64  `json:"chat_id"`
+	PushChatID          int64  `json:"push_chat_id"`
+	PushMessageThreadID int    `json:"push_message_thread_id"`
+	PushSMS             bool   `json:"push_sms"`
+	Source              string `json:"source"` // "config" | "settings"
 }
 
 type telegramPut struct {
-	BotToken *string `json:"bot_token,omitempty"`
-	ChatID   *int64  `json:"chat_id,omitempty"`
-	PushSMS  *bool   `json:"push_sms,omitempty"`
-	Clear    bool    `json:"clear,omitempty"` // 为 true 时清空 bot_token
+	BotToken            *string `json:"bot_token,omitempty"`
+	ChatID              *int64  `json:"chat_id,omitempty"`
+	PushChatID          *int64  `json:"push_chat_id,omitempty"`
+	PushMessageThreadID *int    `json:"push_message_thread_id,omitempty"`
+	PushSMS             *bool   `json:"push_sms,omitempty"`
+	Clear               bool    `json:"clear,omitempty"` // 为 true 时清空 bot_token
 }
 
 const telegramSettingsKey = "telegram"
@@ -40,10 +44,12 @@ func registerSettings(r chi.Router, deps Deps) {
 	r.Get("/settings/telegram", func(w http.ResponseWriter, req *http.Request) {
 		cur, source := loadTelegram(req.Context(), deps)
 		writeJSON(w, http.StatusOK, telegramDTO{
-			HasToken: cur.BotToken != "",
-			ChatID:   cur.ChatID,
-			PushSMS:  cur.PushSMS,
-			Source:   source,
+			HasToken:            cur.BotToken != "",
+			ChatID:              cur.ChatID,
+			PushChatID:          cur.PushChatID,
+			PushMessageThreadID: cur.PushMessageThreadID,
+			PushSMS:             cur.PushSMS,
+			Source:              source,
 		})
 	})
 
@@ -62,6 +68,12 @@ func registerSettings(r chi.Router, deps Deps) {
 		}
 		if body.ChatID != nil {
 			cur.ChatID = *body.ChatID
+		}
+		if body.PushChatID != nil {
+			cur.PushChatID = *body.PushChatID
+		}
+		if body.PushMessageThreadID != nil {
+			cur.PushMessageThreadID = *body.PushMessageThreadID
 		}
 		if body.PushSMS != nil {
 			cur.PushSMS = *body.PushSMS
@@ -86,14 +98,16 @@ func registerSettings(r chi.Router, deps Deps) {
 			Actor:  actorFromRequest(req),
 			Action: "settings.telegram.update",
 			Payload: map[string]any{
-				"has_token": cur.BotToken != "",
-				"chat_id":   cur.ChatID,
-				"push_sms":  cur.PushSMS,
-				"cleared":   body.Clear,
+				"has_token":              cur.BotToken != "",
+				"chat_id":                cur.ChatID,
+				"push_chat_id":           cur.PushChatID,
+				"push_message_thread_id": cur.PushMessageThreadID,
+				"push_sms":               cur.PushSMS,
+				"cleared":                body.Clear,
 			},
 			Result: "ok",
 		})
-		// 热重载：token/chat_id/push_sms 任一变更都重启 bot。
+		// 热重载：token/chat_id/push_chat_id/push_message_thread_id/push_sms 任一变更都重启 bot。
 		if deps.TelegramCtl != nil {
 			if err := deps.TelegramCtl.Reload(req.Context(), cur); err != nil {
 				// 记录但不阻塞 PUT 成功返回——settings 已保存
@@ -102,14 +116,16 @@ func registerSettings(r chi.Router, deps Deps) {
 			}
 		}
 		writeJSON(w, http.StatusOK, telegramDTO{
-			HasToken: cur.BotToken != "",
-			ChatID:   cur.ChatID,
-			PushSMS:  cur.PushSMS,
-			Source:   "settings",
+			HasToken:            cur.BotToken != "",
+			ChatID:              cur.ChatID,
+			PushChatID:          cur.PushChatID,
+			PushMessageThreadID: cur.PushMessageThreadID,
+			PushSMS:             cur.PushSMS,
+			Source:              "settings",
 		})
 	})
 
-	// POST /settings/telegram/test —— 发送一条测试消息到已绑定 chat_id。
+	// POST /settings/telegram/test —— 发送一条测试消息到短信推送目的地。
 	// Body: {"text":"可选"}；空文本也可用，仅发默认 "测试消息" 提示。
 	// 412：bot 未配置；500：Telegram API 返回错误；200：成功。
 	r.Post("/settings/telegram/test", func(w http.ResponseWriter, req *http.Request) {

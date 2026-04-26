@@ -25,10 +25,14 @@ import (
 type mockTelegramCtl struct {
 	testPushErr atomic.Pointer[error]
 	testCalls   atomic.Int32
+	reloadCalls atomic.Int32
 	lastText    atomic.Value // string
+	lastConfig  atomic.Value // config.TelegramConfig
 }
 
-func (m *mockTelegramCtl) Reload(_ context.Context, _ config.TelegramConfig) error {
+func (m *mockTelegramCtl) Reload(_ context.Context, cfg config.TelegramConfig) error {
+	m.reloadCalls.Add(1)
+	m.lastConfig.Store(cfg)
 	return nil
 }
 
@@ -194,5 +198,62 @@ func TestTelegramTest_EmptyBodyAllowed(t *testing.T) {
 	}
 	if ctl.testCalls.Load() != 1 {
 		t.Fatalf("expected 1 call, got %d", ctl.testCalls.Load())
+	}
+}
+
+func TestTelegramSettings_NewPushFieldsRoundTrip(t *testing.T) {
+	ctl := &mockTelegramCtl{}
+	srv, tok := setupSettings(t, ctl)
+
+	body, _ := json.Marshal(map[string]any{
+		"bot_token":              "123:abc",
+		"chat_id":                int64(2015959023),
+		"push_chat_id":           int64(-1001234567890),
+		"push_message_thread_id": 8096,
+		"push_sms":               true,
+	})
+	req, _ := http.NewRequest(http.MethodPut,
+		srv.URL+"/api/settings/telegram", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("PUT status=%d", resp.StatusCode)
+	}
+	var putResp telegramDTO
+	if err := json.NewDecoder(resp.Body).Decode(&putResp); err != nil {
+		t.Fatal(err)
+	}
+	if !putResp.HasToken || putResp.ChatID != 2015959023 || putResp.PushChatID != -1001234567890 || putResp.PushMessageThreadID != 8096 || !putResp.PushSMS {
+		t.Fatalf("unexpected PUT response: %+v", putResp)
+	}
+	if ctl.reloadCalls.Load() != 1 {
+		t.Fatalf("expected reload once, got %d", ctl.reloadCalls.Load())
+	}
+	cfg, _ := ctl.lastConfig.Load().(config.TelegramConfig)
+	if cfg.ChatID != 2015959023 || cfg.PushChatID != -1001234567890 || cfg.PushMessageThreadID != 8096 || !cfg.PushSMS {
+		t.Fatalf("reload config missing new fields: %+v", cfg)
+	}
+
+	getReq, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/settings/telegram", nil)
+	getReq.Header.Set("Authorization", "Bearer "+tok)
+	getResp, err := http.DefaultClient.Do(getReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer getResp.Body.Close()
+	if getResp.StatusCode != 200 {
+		t.Fatalf("GET status=%d", getResp.StatusCode)
+	}
+	var getBody telegramDTO
+	if err := json.NewDecoder(getResp.Body).Decode(&getBody); err != nil {
+		t.Fatal(err)
+	}
+	if getBody.Source != "settings" || !getBody.HasToken || getBody.ChatID != 2015959023 || getBody.PushChatID != -1001234567890 || getBody.PushMessageThreadID != 8096 || !getBody.PushSMS {
+		t.Fatalf("unexpected GET response: %+v", getBody)
 	}
 }

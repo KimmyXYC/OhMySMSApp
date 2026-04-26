@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -18,16 +19,30 @@ import (
 
 // botAPI 是我们用到的 tgbotapi 子集，便于测试打桩。
 type botAPI interface {
+	MakeRequest(endpoint string, params tgbotapi.Params) (*tgbotapi.APIResponse, error)
 	Send(c tgbotapi.Chattable) (tgbotapi.Message, error)
 	Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error)
 	GetUpdatesChan(config tgbotapi.UpdateConfig) tgbotapi.UpdatesChannel
 	StopReceivingUpdates()
 }
 
+type pushedSMSKey struct {
+	ChatID    int64
+	MessageID int
+}
+
+type pushedSMSTarget struct {
+	DeviceID  string
+	Peer      string
+	CreatedAt time.Time
+}
+
 // bot 是运行时单例。每次 Reload 会销毁旧实例、创建新实例。
 type bot struct {
 	api         botAPI
 	chatID      int64
+	pushChatID  int64
+	pushThread  int
 	pushSMS     bool
 	provider    modem.Provider
 	runner      *modem.Runner
@@ -37,6 +52,8 @@ type bot struct {
 	log         *slog.Logger
 	sessions    *sessionStore
 	rateLimiter *rateLimiter
+	pushedSMS   map[pushedSMSKey]pushedSMSTarget
+	pushedSMSMu sync.Mutex
 
 	// 运行时
 	ctx    context.Context
@@ -55,7 +72,7 @@ type bot struct {
 
 // newBot 创建 bot（含与 Telegram API 的连接）。token 为空返回 error。
 func newBot(parent context.Context,
-	token string, chatID int64, pushSMS bool,
+	token string, chatID, pushChatID int64, pushMessageThreadID int, pushSMS bool,
 	provider modem.Provider, runner *modem.Runner, store *modem.Store,
 	auditSvc *audit.Service, esimSvc *esim.Service, log *slog.Logger,
 ) (*bot, error) {
@@ -66,19 +83,24 @@ func newBot(parent context.Context,
 	if err != nil {
 		return nil, fmt.Errorf("connect telegram: %w", err)
 	}
-	return newBotWithAPI(parent, api, chatID, pushSMS, provider, runner, store, auditSvc, esimSvc, log), nil
+	return newBotWithAPI(parent, api, chatID, pushChatID, pushMessageThreadID, pushSMS, provider, runner, store, auditSvc, esimSvc, log), nil
 }
 
 // newBotWithAPI 允许测试注入 fake api。
 func newBotWithAPI(parent context.Context,
-	api botAPI, chatID int64, pushSMS bool,
+	api botAPI, chatID, pushChatID int64, pushMessageThreadID int, pushSMS bool,
 	provider modem.Provider, runner *modem.Runner, store *modem.Store,
 	auditSvc *audit.Service, esimSvc *esim.Service, log *slog.Logger,
 ) *bot {
 	ctx, cancel := context.WithCancel(parent)
+	if pushChatID == 0 {
+		pushChatID = chatID
+	}
 	return &bot{
 		api:             api,
 		chatID:          chatID,
+		pushChatID:      pushChatID,
+		pushThread:      pushMessageThreadID,
 		pushSMS:         pushSMS,
 		provider:        provider,
 		runner:          runner,
@@ -88,6 +110,7 @@ func newBotWithAPI(parent context.Context,
 		log:             log,
 		sessions:        newSessionStore(5 * time.Minute),
 		rateLimiter:     newRateLimiter(100 * time.Millisecond),
+		pushedSMS:       make(map[pushedSMSKey]pushedSMSTarget),
 		ctx:             ctx,
 		cancel:          cancel,
 		lastSIMByDevice: make(map[string]simSnapshot),
@@ -199,10 +222,16 @@ func (b *bot) handleUpdate(upd tgbotapi.Update) {
 	}
 	msg := upd.Message
 
-	// 鉴权：只处理绑定的 chat_id
-	if b.chatID != 0 && msg.Chat != nil && msg.Chat.ID != b.chatID {
+	// 推送群/topic 中，对某条短信推送的直接 reply 允许作为短信回复处理；
+	// 这条路径只匹配已记录的推送消息，不开放普通命令权限。
+	if b.handleDirectSMSReply(msg) {
+		return
+	}
+
+	// 鉴权：管理命令/会话只处理绑定的管理 chat_id；未绑定时拒绝普通交互。
+	if b.chatID == 0 || msg.Chat == nil || msg.Chat.ID != b.chatID {
 		b.log.Warn("telegram message from unauthorized chat",
-			"chat_id", msg.Chat.ID, "text", truncate(msg.Text, 40))
+			"chat_id", chatIDOf(msg), "text", truncate(msg.Text, 40))
 		return
 	}
 
@@ -226,15 +255,11 @@ func (b *bot) sendText(text string) (tgbotapi.Message, error) {
 	if b.chatID == 0 {
 		return tgbotapi.Message{}, fmt.Errorf("no chat_id bound")
 	}
-	b.rateLimiter.wait(b.ctx, b.chatID)
-	msg := tgbotapi.NewMessage(b.chatID, text)
-	msg.ParseMode = tgbotapi.ModeMarkdownV2
-	m, err := b.api.Send(msg)
+	m, err := b.sendMessage(b.chatID, 0, text, tgbotapi.ModeMarkdownV2, 0, nil)
 	if err != nil {
 		b.log.Warn("telegram send failed", "err", err)
 		// 退化尝试一次：去掉 ParseMode（防止 escape 出 bug 时完全失联）
-		msg2 := tgbotapi.NewMessage(b.chatID, stripMarkdownV2(text))
-		if m2, err2 := b.api.Send(msg2); err2 == nil {
+		if m2, err2 := b.sendMessage(b.chatID, 0, stripMarkdownV2(text), "", 0, nil); err2 == nil {
 			return m2, nil
 		}
 	}
@@ -246,13 +271,94 @@ func (b *bot) sendWithMarkup(text string, markup any) (tgbotapi.Message, error) 
 	if b.chatID == 0 {
 		return tgbotapi.Message{}, fmt.Errorf("no chat_id bound")
 	}
-	b.rateLimiter.wait(b.ctx, b.chatID)
-	msg := tgbotapi.NewMessage(b.chatID, text)
-	msg.ParseMode = tgbotapi.ModeMarkdownV2
-	if markup != nil {
-		msg.ReplyMarkup = markup
+	return b.sendMessage(b.chatID, 0, text, tgbotapi.ModeMarkdownV2, 0, markup)
+}
+
+func (b *bot) sendPushText(text string) (tgbotapi.Message, error) {
+	chatID := b.effectivePushChatID()
+	if chatID == 0 {
+		return tgbotapi.Message{}, fmt.Errorf("no push chat_id bound")
 	}
-	return b.api.Send(msg)
+	m, err := b.sendMessage(chatID, b.pushThread, text, tgbotapi.ModeMarkdownV2, 0, nil)
+	if err != nil {
+		b.log.Warn("telegram push send failed", "err", err)
+		if m2, err2 := b.sendMessage(chatID, b.pushThread, stripMarkdownV2(text), "", 0, nil); err2 == nil {
+			return m2, nil
+		}
+	}
+	return m, err
+}
+
+func (b *bot) effectivePushChatID() int64 {
+	if b.pushChatID != 0 {
+		return b.pushChatID
+	}
+	return b.chatID
+}
+
+func (b *bot) sendMessage(chatID int64, messageThreadID int, text, parseMode string, replyToMessageID int, markup any) (tgbotapi.Message, error) {
+	if chatID == 0 {
+		return tgbotapi.Message{}, fmt.Errorf("no chat_id bound")
+	}
+	b.rateLimiter.wait(b.ctx, chatID)
+	if messageThreadID <= 0 {
+		msg := tgbotapi.NewMessage(chatID, text)
+		msg.ParseMode = parseMode
+		msg.ReplyToMessageID = replyToMessageID
+		if replyToMessageID != 0 {
+			msg.AllowSendingWithoutReply = true
+		}
+		if markup != nil {
+			msg.ReplyMarkup = markup
+		}
+		return b.api.Send(msg)
+	}
+
+	params := make(tgbotapi.Params)
+	params.AddNonZero64("chat_id", chatID)
+	params.AddNonZero("message_thread_id", messageThreadID)
+	params.AddNonEmpty("text", text)
+	params.AddNonEmpty("parse_mode", parseMode)
+	params.AddNonZero("reply_to_message_id", replyToMessageID)
+	if replyToMessageID != 0 {
+		params.AddBool("allow_sending_without_reply", true)
+	}
+	if markup != nil {
+		buf, err := json.Marshal(markup)
+		if err != nil {
+			return tgbotapi.Message{}, err
+		}
+		params["reply_markup"] = string(buf)
+	}
+	resp, err := b.api.MakeRequest("sendMessage", params)
+	if err != nil {
+		return tgbotapi.Message{}, err
+	}
+	var msg tgbotapi.Message
+	if resp != nil && len(resp.Result) > 0 {
+		if err := json.Unmarshal(resp.Result, &msg); err != nil {
+			return tgbotapi.Message{}, err
+		}
+	}
+	return msg, nil
+}
+
+func (b *bot) replyPlain(msg *tgbotapi.Message, text string) (tgbotapi.Message, error) {
+	if msg == nil || msg.Chat == nil {
+		return tgbotapi.Message{}, fmt.Errorf("no chat bound")
+	}
+	threadID := 0
+	if msg.Chat.ID == b.effectivePushChatID() {
+		threadID = b.pushThread
+	}
+	return b.sendMessage(msg.Chat.ID, threadID, text, "", msg.MessageID, nil)
+}
+
+func chatIDOf(msg *tgbotapi.Message) int64 {
+	if msg == nil || msg.Chat == nil {
+		return 0
+	}
+	return msg.Chat.ID
 }
 
 // stripMarkdownV2 极简退化：去掉反斜杠 escape 字符。仅做为失败回退。

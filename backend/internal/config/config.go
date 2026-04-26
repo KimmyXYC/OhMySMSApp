@@ -46,9 +46,11 @@ type ModemConfig struct {
 }
 
 type TelegramConfig struct {
-	BotToken string `yaml:"bot_token"`
-	ChatID   int64  `yaml:"chat_id"`
-	PushSMS  bool   `yaml:"push_sms"`
+	BotToken            string `yaml:"bot_token"`
+	ChatID              int64  `yaml:"chat_id"`
+	PushChatID          int64  `yaml:"push_chat_id"`
+	PushMessageThreadID int    `yaml:"push_message_thread_id"`
+	PushSMS             bool   `yaml:"push_sms"`
 }
 
 type ESIMConfig struct {
@@ -135,6 +137,9 @@ func (c Config) Validate() error {
 	}
 	if c.Modem.SignalPoll < time.Second {
 		return fmt.Errorf("modem.signal_poll must be >= 1s")
+	}
+	if c.Telegram.PushMessageThreadID < 0 {
+		return fmt.Errorf("telegram.push_message_thread_id must be >= 0")
 	}
 	return nil
 }

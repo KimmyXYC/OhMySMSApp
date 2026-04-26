@@ -2,8 +2,10 @@ package telegram
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -16,10 +18,16 @@ import (
 
 // fakeBotAPI 记录所有 Send 调用，供断言使用。
 type fakeBotAPI struct {
-	mu       sync.Mutex
-	sent     []tgbotapi.Chattable
-	requests []tgbotapi.Chattable
-	updates  chan tgbotapi.Update
+	mu           sync.Mutex
+	sent         []tgbotapi.Chattable
+	requests     []tgbotapi.Chattable
+	makeRequests []fakeMakeRequest
+	updates      chan tgbotapi.Update
+}
+
+type fakeMakeRequest struct {
+	endpoint string
+	params   tgbotapi.Params
 }
 
 func newFakeBotAPI() *fakeBotAPI {
@@ -31,6 +39,20 @@ func (f *fakeBotAPI) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
 	defer f.mu.Unlock()
 	f.sent = append(f.sent, c)
 	return tgbotapi.Message{MessageID: len(f.sent)}, nil
+}
+
+func (f *fakeBotAPI) MakeRequest(endpoint string, params tgbotapi.Params) (*tgbotapi.APIResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cp := make(tgbotapi.Params, len(params))
+	for k, v := range params {
+		cp[k] = v
+	}
+	f.makeRequests = append(f.makeRequests, fakeMakeRequest{endpoint: endpoint, params: cp})
+	messageID := len(f.sent) + len(f.makeRequests)
+	chatID, _ := strconv.ParseInt(params["chat_id"], 10, 64)
+	result, _ := json.Marshal(tgbotapi.Message{MessageID: messageID, Chat: &tgbotapi.Chat{ID: chatID}})
+	return &tgbotapi.APIResponse{Ok: true, Result: result}, nil
 }
 
 func (f *fakeBotAPI) Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
@@ -68,6 +90,21 @@ func (f *fakeBotAPI) lastMessageText() string {
 	return ""
 }
 
+func (f *fakeBotAPI) makeRequestCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.makeRequests)
+}
+
+func (f *fakeBotAPI) lastMakeRequest() fakeMakeRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.makeRequests) == 0 {
+		return fakeMakeRequest{}
+	}
+	return f.makeRequests[len(f.makeRequests)-1]
+}
+
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
@@ -76,7 +113,7 @@ func discardLogger() *slog.Logger {
 func testBot(t *testing.T, provider modem.Provider) (*bot, *fakeBotAPI) {
 	t.Helper()
 	fb := newFakeBotAPI()
-	b := newBotWithAPI(context.Background(), fb, 12345, true,
+	b := newBotWithAPI(context.Background(), fb, 12345, 0, 0, true,
 		provider, nil, nil, nil, nil, discardLogger())
 	b.offlineGrace = 20 * time.Millisecond
 	return b, fb
@@ -110,20 +147,148 @@ func TestPushSMSReceived(t *testing.T) {
 	if !strings.Contains(txt, "新短信") || !strings.Contains(txt, "654321") {
 		t.Errorf("unexpected push text: %s", txt)
 	}
-	// 应有 inline keyboard
+	// 短信推送不再生成 inline keyboard，直接回复 Telegram 消息即可回短信。
 	mc, ok := fb.sent[0].(tgbotapi.MessageConfig)
 	if !ok {
 		t.Fatalf("expected MessageConfig, got %T", fb.sent[0])
 	}
-	if mc.ReplyMarkup == nil {
-		t.Error("expected reply markup (↩️ 回复 button)")
+	if mc.ChatID != b.chatID {
+		t.Fatalf("expected fallback chat_id %d, got %d", b.chatID, mc.ChatID)
+	}
+	if mc.ReplyMarkup != nil {
+		t.Errorf("expected no reply markup, got %T", mc.ReplyMarkup)
+	}
+}
+
+func TestPushSMSReceived_UsesPushChatAndTopicNoReplyMarkup(t *testing.T) {
+	prov := modem.NewMockProvider(discardLogger())
+	b, fb := testBot(t, prov)
+	b.pushChatID = 67890
+	b.pushThread = 8096
+	dev := prov.ListModems()[0].DeviceID
+
+	b.dispatchEvent(modem.Event{
+		Kind:     modem.EventSMSReceived,
+		DeviceID: dev,
+		Payload:  modem.SMSRecord{Peer: "+1234567890", Text: "code: 654321"},
+	})
+
+	if fb.sentCount() != 0 {
+		t.Fatalf("threaded push should use MakeRequest, got %d Send calls", fb.sentCount())
+	}
+	if fb.makeRequestCount() != 1 {
+		t.Fatalf("expected 1 MakeRequest, got %d", fb.makeRequestCount())
+	}
+	req := fb.lastMakeRequest()
+	if req.endpoint != "sendMessage" {
+		t.Fatalf("unexpected endpoint: %s", req.endpoint)
+	}
+	if req.params["chat_id"] != "67890" {
+		t.Fatalf("expected push_chat_id 67890, got %q", req.params["chat_id"])
+	}
+	if req.params["message_thread_id"] != "8096" {
+		t.Fatalf("expected thread 8096, got %q", req.params["message_thread_id"])
+	}
+	if req.params["reply_markup"] != "" {
+		t.Fatalf("expected no reply_markup, got %q", req.params["reply_markup"])
+	}
+	if !strings.Contains(req.params["text"], "新短信") || !strings.Contains(req.params["text"], "654321") {
+		t.Fatalf("unexpected text: %s", req.params["text"])
+	}
+	if _, ok := b.lookupPushedSMS(67890, 1); !ok {
+		t.Fatalf("expected pushed SMS mapping recorded")
+	}
+}
+
+func TestPushSMSReceived_PushChatZeroFallsBackToChatID(t *testing.T) {
+	prov := modem.NewMockProvider(discardLogger())
+	b, fb := testBot(t, prov)
+	b.pushChatID = 0
+	dev := prov.ListModems()[0].DeviceID
+
+	b.dispatchEvent(modem.Event{
+		Kind:     modem.EventSMSReceived,
+		DeviceID: dev,
+		Payload:  modem.SMSRecord{Peer: "+1", Text: "fallback"},
+	})
+
+	if fb.sentCount() != 1 {
+		t.Fatalf("expected 1 Send call, got %d", fb.sentCount())
+	}
+	mc, ok := fb.sent[0].(tgbotapi.MessageConfig)
+	if !ok {
+		t.Fatalf("expected MessageConfig, got %T", fb.sent[0])
+	}
+	if mc.ChatID != b.chatID {
+		t.Fatalf("expected chat_id fallback %d, got %d", b.chatID, mc.ChatID)
+	}
+	if mc.ReplyMarkup != nil {
+		t.Fatalf("expected no ReplyMarkup, got %T", mc.ReplyMarkup)
+	}
+}
+
+func TestDirectReplyToPushedSMSCallsProviderSendSMS(t *testing.T) {
+	prov := modem.NewMockProvider(discardLogger())
+	b, fb := testBot(t, prov)
+	b.pushChatID = 67890
+	b.pushThread = 8096
+	dev := prov.ListModems()[0].DeviceID
+	b.recordPushedSMS(b.pushChatID, 77, dev, "+1234567890")
+
+	b.handleUpdate(tgbotapi.Update{Message: &tgbotapi.Message{
+		MessageID: 88,
+		Chat:      &tgbotapi.Chat{ID: b.pushChatID},
+		Text:      "reply body",
+		ReplyToMessage: &tgbotapi.Message{
+			MessageID: 77,
+			Chat:      &tgbotapi.Chat{ID: b.pushChatID},
+		},
+	}})
+
+	sms, err := prov.ListSMS(dev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sms) == 0 {
+		t.Fatal("expected outbound SMS recorded by mock provider")
+	}
+	last := sms[len(sms)-1]
+	if last.Peer != "+1234567890" || last.Text != "reply body" || last.Direction != "outbound" {
+		t.Fatalf("unexpected sent SMS: %+v", last)
+	}
+	if fb.makeRequestCount() != 1 {
+		t.Fatalf("expected one ack reply in same topic, got %d", fb.makeRequestCount())
+	}
+	req := fb.lastMakeRequest()
+	if req.params["chat_id"] != "67890" || req.params["message_thread_id"] != "8096" || req.params["reply_to_message_id"] != "88" {
+		t.Fatalf("ack should target same chat/topic/message, params=%+v", req.params)
+	}
+	if !strings.Contains(req.params["text"], "已提交发送") {
+		t.Fatalf("unexpected ack text: %s", req.params["text"])
+	}
+}
+
+func TestPushChatCannotRunManagementCommands(t *testing.T) {
+	prov := modem.NewMockProvider(discardLogger())
+	b, fb := testBot(t, prov)
+	b.pushChatID = 67890
+
+	b.handleUpdate(tgbotapi.Update{Message: &tgbotapi.Message{
+		MessageID: 1,
+		Chat:      &tgbotapi.Chat{ID: b.pushChatID},
+		Text:      "/status",
+		Entities:  []tgbotapi.MessageEntity{{Type: "bot_command", Offset: 0, Length: 7}},
+	}})
+
+	if fb.sentCount() != 0 || fb.makeRequestCount() != 0 {
+		t.Fatalf("push chat command should be ignored, sends=%d makeRequests=%d", fb.sentCount(), fb.makeRequestCount())
 	}
 }
 
 func TestPushSMS_DisabledWhenPushSMSFalse(t *testing.T) {
 	prov := modem.NewMockProvider(discardLogger())
 	fb := newFakeBotAPI()
-	b := newBotWithAPI(context.Background(), fb, 12345, false,
+	b := newBotWithAPI(context.Background(), fb, 12345, 0, 0, false,
 		prov, nil, nil, nil, nil, discardLogger())
 
 	dev := prov.ListModems()[0].DeviceID

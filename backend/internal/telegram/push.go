@@ -3,10 +3,14 @@ package telegram
 import (
 	"context"
 	"errors"
+	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"github.com/KimmyXYC/ohmysmsapp/backend/internal/audit"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/modem"
 )
 
@@ -60,7 +64,7 @@ func (b *bot) dispatchEvent(ev modem.Event) {
 		nickname := b.lookupNickname(ev.DeviceID)
 		// 初始化 SIM 状态记录，避免下一次 ModemUpdated 误报为"插入"。
 		b.recordSIMSnapshot(ev.DeviceID, st)
-		_, _ = b.sendText(formatModemOnline(st, nickname))
+		_, _ = b.sendPushText(formatModemOnline(st, nickname))
 
 	case modem.EventModemRemoved:
 		st, _ := ev.Payload.(modem.ModemState)
@@ -126,7 +130,7 @@ func (b *bot) scheduleOffline(deviceID string, st modem.ModemState) {
 		b.simStateMu.Unlock()
 		nickname := b.lookupNickname(deviceID)
 		b.clearSIMSnapshot(deviceID)
-		_, _ = b.sendText(formatModemOffline(st, nickname))
+		_, _ = b.sendPushText(formatModemOffline(st, nickname))
 	})
 	b.pendingOffline[deviceID] = timer
 	b.simStateMu.Unlock()
@@ -228,17 +232,18 @@ func (b *bot) handleSIMDiff(deviceID string, st modem.ModemState) {
 	nickname := b.lookupNickname(deviceID)
 	switch {
 	case prev.ICCID == "" && curr != "":
-		_, _ = b.sendText(formatSIMInserted(st, nickname))
+		_, _ = b.sendPushText(formatSIMInserted(st, nickname))
 	case prev.ICCID != "" && curr == "":
-		_, _ = b.sendText(formatSIMRemoved(st, nickname, prev.ICCID, prev.Operator))
+		_, _ = b.sendPushText(formatSIMRemoved(st, nickname, prev.ICCID, prev.Operator))
 	case prev.ICCID != "" && curr != "" && prev.ICCID != curr:
-		_, _ = b.sendText(formatSIMReplaced(st, nickname, prev.ICCID))
+		_, _ = b.sendPushText(formatSIMReplaced(st, nickname, prev.ICCID))
 	}
 }
 
-// pushSMSReceived 发送新短信通知 + "回复" 按钮。
+// pushSMSReceived 发送新短信通知，并记录 Telegram message_id → 原短信目标映射。
 func (b *bot) pushSMSReceived(deviceID string, rec modem.SMSRecord) {
-	if b.chatID == 0 {
+	pushChatID := b.effectivePushChatID()
+	if pushChatID == 0 {
 		return
 	}
 	// 构造标签
@@ -258,19 +263,98 @@ func (b *bot) pushSMSReceived(deviceID string, rec modem.SMSRecord) {
 	}
 
 	text := formatSMSNotification(rec, modemLabel, simLabel, deviceID, modemIndex)
-
-	// 回复按钮 callback data。注意 callback data 最长 64 字节，peer 一般不会超。
-	data := "replyto:" + deviceID + ":" + rec.Peer
-	if len(data) > 60 {
-		// 截断兜底：过长就只带 deviceID，reply 流程会要求用户重新输号码
-		data = "replyto:" + deviceID + ":"
-	}
-	markup := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("↩️ 回复", data),
-		),
-	)
-	if _, err := b.sendWithMarkup(text, markup); err != nil {
+	m, err := b.sendMessage(pushChatID, b.pushThread, text, tgbotapi.ModeMarkdownV2, 0, nil)
+	if err != nil {
 		b.log.Warn("telegram push sms failed", "err", err, "peer", rec.Peer)
+		return
 	}
+	b.recordPushedSMS(pushChatID, m.MessageID, deviceID, rec.Peer)
+}
+
+func (b *bot) recordPushedSMS(chatID int64, messageID int, deviceID, peer string) {
+	if chatID == 0 || messageID == 0 || deviceID == "" || peer == "" {
+		return
+	}
+	b.pushedSMSMu.Lock()
+	defer b.pushedSMSMu.Unlock()
+	if b.pushedSMS == nil {
+		b.pushedSMS = make(map[pushedSMSKey]pushedSMSTarget)
+	}
+	now := time.Now()
+	for k, v := range b.pushedSMS {
+		if now.Sub(v.CreatedAt) > 7*24*time.Hour {
+			delete(b.pushedSMS, k)
+		}
+	}
+	b.pushedSMS[pushedSMSKey{ChatID: chatID, MessageID: messageID}] = pushedSMSTarget{
+		DeviceID:  deviceID,
+		Peer:      peer,
+		CreatedAt: now,
+	}
+}
+
+func (b *bot) lookupPushedSMS(chatID int64, messageID int) (pushedSMSTarget, bool) {
+	b.pushedSMSMu.Lock()
+	defer b.pushedSMSMu.Unlock()
+	target, ok := b.pushedSMS[pushedSMSKey{ChatID: chatID, MessageID: messageID}]
+	return target, ok
+}
+
+func (b *bot) handleDirectSMSReply(msg *tgbotapi.Message) bool {
+	if msg == nil || msg.Chat == nil || msg.ReplyToMessage == nil {
+		return false
+	}
+	if msg.Chat.ID != b.effectivePushChatID() {
+		return false
+	}
+	target, ok := b.lookupPushedSMS(msg.Chat.ID, msg.ReplyToMessage.MessageID)
+	if !ok {
+		return false
+	}
+	text := strings.TrimSpace(msg.Text)
+	if text == "" {
+		_, _ = b.replyPlain(msg, "只支持文本短信回复")
+		return true
+	}
+	b.executeDirectSMSReply(msg, target, text)
+	return true
+}
+
+func (b *bot) executeDirectSMSReply(msg *tgbotapi.Message, target pushedSMSTarget, text string) {
+	ctx, cancel := context.WithTimeout(b.bgCtx(), 30*time.Second)
+	defer cancel()
+	extID, err := b.provider.SendSMS(ctx, target.DeviceID, target.Peer, text)
+	actorChatID := b.chatID
+	if msg != nil && msg.Chat != nil {
+		actorChatID = msg.Chat.ID
+	}
+	if err != nil {
+		b.logAudit(audit.Entry{
+			Actor:  "telegram:" + strconv.FormatInt(actorChatID, 10),
+			Action: "sms.send",
+			Target: target.DeviceID,
+			Payload: map[string]any{
+				"peer":     target.Peer,
+				"body_len": utf8.RuneCountInString(text),
+				"via":      "telegram_direct_reply",
+			},
+			Result: "error",
+			Err:    err.Error(),
+		})
+		_, _ = b.replyPlain(msg, "发送失败: "+err.Error())
+		return
+	}
+	b.logAudit(audit.Entry{
+		Actor:  "telegram:" + strconv.FormatInt(actorChatID, 10),
+		Action: "sms.send",
+		Target: target.DeviceID,
+		Payload: map[string]any{
+			"peer":     target.Peer,
+			"body_len": utf8.RuneCountInString(text),
+			"ext_id":   extID,
+			"via":      "telegram_direct_reply",
+		},
+		Result: "ok",
+	})
+	_, _ = b.replyPlain(msg, "✅ 已提交发送")
 }

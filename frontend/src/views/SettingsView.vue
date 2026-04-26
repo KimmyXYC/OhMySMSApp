@@ -15,6 +15,8 @@ const source = ref('')
 const form = ref({
   bot_token: '',
   chat_id: 0 as number,
+  push_chat_id: 0 as number,
+  push_message_thread_id: 0 as number,
   push_sms: false,
 })
 
@@ -53,6 +55,8 @@ async function loadSettings() {
     hasToken.value = data.has_token
     source.value = data.source
     form.value.chat_id = data.chat_id
+    form.value.push_chat_id = data.push_chat_id
+    form.value.push_message_thread_id = data.push_message_thread_id
     form.value.push_sms = data.push_sms
   } catch (e: any) {
     ElMessage.error(e.response?.data?.error || '加载设置失败')
@@ -66,6 +70,8 @@ async function handleSave() {
   try {
     const payload: Record<string, any> = {
       chat_id: form.value.chat_id,
+      push_chat_id: form.value.push_chat_id,
+      push_message_thread_id: form.value.push_message_thread_id,
       push_sms: form.value.push_sms,
     }
     if (form.value.bot_token) {
@@ -169,13 +175,38 @@ onMounted(() => {
           </span>
         </el-form-item>
 
-        <el-form-item label="Chat ID">
+        <el-form-item label="管理 Chat ID">
           <el-input-number
             v-model="form.chat_id"
             :controls="false"
             style="max-width: 200px"
-            placeholder="Telegram Chat ID"
+            placeholder="管理/命令 Chat ID"
           />
+        </el-form-item>
+
+        <el-form-item label="推送 Chat ID">
+          <el-input-number
+            v-model="form.push_chat_id"
+            :controls="false"
+            style="max-width: 200px"
+            placeholder="0 = 回退管理 Chat"
+          />
+          <span class="field-hint" style="margin-left: 8px; color: var(--el-text-color-secondary); font-size: 13px">
+            短信推送目的群/私聊，0 表示沿用管理 Chat
+          </span>
+        </el-form-item>
+
+        <el-form-item label="推送 Topic ID">
+          <el-input-number
+            v-model="form.push_message_thread_id"
+            :controls="false"
+            :min="0"
+            style="max-width: 200px"
+            placeholder="例如 8096"
+          />
+          <span class="field-hint" style="margin-left: 8px; color: var(--el-text-color-secondary); font-size: 13px">
+            Telegram Forum topic/thread ID；不使用 Topic 时填 0
+          </span>
         </el-form-item>
 
         <el-form-item label="推送短信">

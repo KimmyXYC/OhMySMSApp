@@ -171,7 +171,7 @@ func (b *bot) promptPickModem(modems []modem.ModemState, prefix string) {
 
 // handleCallback 处理 inline keyboard 点击。
 func (b *bot) handleCallback(cb *tgbotapi.CallbackQuery) {
-	if b.chatID != 0 && cb.Message != nil && cb.Message.Chat != nil && cb.Message.Chat.ID != b.chatID {
+	if cb.Message == nil || cb.Message.Chat == nil || b.chatID == 0 || cb.Message.Chat.ID != b.chatID {
 		return
 	}
 	// 先 ack 回调（否则客户端转圈）

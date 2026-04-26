@@ -40,9 +40,14 @@ modem:
 telegram:
   # Bot Token，从 @BotFather 获取。留空关闭 Bot 子系统。
   bot_token: ""
-  # 允许使用的单个 chat_id（私聊或群组 ID）。
+  # 管理/命令 chat_id（私聊或群组 ID）。只有该 chat 可执行 /status、/send 等命令。
   chat_id: 0
-  # 收到短信后是否自动推送到上述 chat。
+  # 短信推送目的 chat_id（可为群组 ID）。为 0 时回退到 chat_id，兼容旧配置。
+  push_chat_id: 0
+  # 短信推送 topic/thread ID；普通群或不使用 topic 时设为 0。
+  # 例如推送到某个 Telegram Forum Topic：8096。
+  push_message_thread_id: 0
+  # 收到短信后是否自动推送到 push_chat_id / push_message_thread_id。
   push_sms: true
 
 esim:
