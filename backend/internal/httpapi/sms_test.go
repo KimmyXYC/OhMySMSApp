@@ -21,6 +21,13 @@ import (
 // setup 启一个内嵌 httptest server，用 MockProvider + 临时 sqlite。
 func setup(t *testing.T) (*httptest.Server, *auth.Service, string) {
 	t.Helper()
+	provider := modem.NewMockProvider(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	srv, authSvc, tok := setupSMSWithProvider(t, provider)
+	return srv, authSvc, tok
+}
+
+func setupSMSWithProvider(t *testing.T, provider modem.Provider) (*httptest.Server, *auth.Service, string) {
+	t.Helper()
 	tmp := t.TempDir()
 	dbPath := filepath.Join(tmp, "test.db")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -34,7 +41,6 @@ func setup(t *testing.T) (*httptest.Server, *auth.Service, string) {
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
-	provider := modem.NewMockProvider(log)
 	store := modem.NewStore(conn)
 	runner := modem.NewRunner(provider, store, log)
 
@@ -69,6 +75,20 @@ func setup(t *testing.T) (*httptest.Server, *auth.Service, string) {
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	return srv, authSvc, tok
+}
+
+type smsStateOverrideProvider struct {
+	*modem.MockProvider
+	deviceID string
+	mutate   func(*modem.ModemState)
+}
+
+func (p *smsStateOverrideProvider) GetModem(deviceID string) (modem.ModemState, bool) {
+	state, ok := p.MockProvider.GetModem(deviceID)
+	if ok && deviceID == p.deviceID && p.mutate != nil {
+		p.mutate(&state)
+	}
+	return state, ok
 }
 
 func TestSMSSend(t *testing.T) {
@@ -125,6 +145,75 @@ func TestSMSSend(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("sent sms not found in list: %+v", out)
+	}
+}
+
+func TestSMSSendRejectsModemWithoutSIM(t *testing.T) {
+	provider := &smsStateOverrideProvider{
+		MockProvider: modem.NewMockProvider(nil),
+		deviceID:     "mock-device-quectel-0001",
+		mutate: func(state *modem.ModemState) {
+			state.HasSim = false
+			state.SIM = nil
+		},
+	}
+	srv, _, tok := setupSMSWithProvider(t, provider)
+
+	resp := postSMSSend(t, srv.URL, tok, map[string]string{
+		"device_id": "mock-device-quectel-0001",
+		"peer":      "+100200",
+		"body":      "hello without sim",
+	})
+	defer resp.Body.Close()
+
+	assertSMSConflict(t, resp, "sim_missing")
+}
+
+func TestSMSSendRejectsUnregisteredModem(t *testing.T) {
+	provider := &smsStateOverrideProvider{
+		MockProvider: modem.NewMockProvider(nil),
+		deviceID:     "mock-device-quectel-0001",
+		mutate: func(state *modem.ModemState) {
+			state.State = modem.ModemStateSearching
+			state.Registration = "searching"
+		},
+	}
+	srv, _, tok := setupSMSWithProvider(t, provider)
+
+	resp := postSMSSend(t, srv.URL, tok, map[string]string{
+		"device_id": "mock-device-quectel-0001",
+		"peer":      "+100200",
+		"body":      "hello while searching",
+	})
+	defer resp.Body.Close()
+
+	assertSMSConflict(t, resp, "modem_not_registered")
+}
+
+func postSMSSend(t *testing.T, baseURL, tok string, body map[string]string) *http.Response {
+	t.Helper()
+	raw, _ := json.Marshal(body)
+	req, _ := http.NewRequest(http.MethodPost, baseURL+"/api/sms/send", bytes.NewReader(raw))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func assertSMSConflict(t *testing.T, resp *http.Response, wantCode string) {
+	t.Helper()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", resp.StatusCode)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["code"] != wantCode {
+		t.Fatalf("expected code %q, got %+v", wantCode, body)
 	}
 }
 

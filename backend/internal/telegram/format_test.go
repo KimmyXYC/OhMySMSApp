@@ -48,9 +48,9 @@ func TestFormatSMSNotification(t *testing.T) {
 		Peer: "+86 1234",
 		Text: "Your code: 654321.",
 	}
-	out := formatSMSNotification(rec, "EC20F", "giffgaff", "dev1", 2)
+	out := formatSMSNotification(rec, "EC20F", "giffgaff", "+491701234567", "dev1", 2)
 	// Sanity checks：关键词出现
-	for _, key := range []string{"📩", "新短信", "EC20F", "giffgaff", "654321"} {
+	for _, key := range []string{"📩", "新短信", "EC20F", "giffgaff", "+491701234567", "654321"} {
 		if !strings.Contains(out, key) {
 			t.Errorf("output missing %q:\n%s", key, out)
 		}

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -83,8 +84,8 @@ func registerSMS(r chi.Router, deps Deps) {
 			writeError(w, http.StatusBadRequest, "bad_request", "invalid json body")
 			return
 		}
-		peer := body.Peer
-		text := body.Body
+		peer := strings.TrimSpace(body.Peer)
+		text := strings.TrimSpace(body.Body)
 		if peer == "" || text == "" {
 			writeError(w, http.StatusBadRequest, "bad_request", "peer and body are required")
 			return
@@ -106,6 +107,23 @@ func registerSMS(r chi.Router, deps Deps) {
 		}
 		if deviceID == "" {
 			writeError(w, http.StatusBadRequest, "bad_request", "device_id or modem_id required")
+			return
+		}
+		state, ok := deps.Modem.GetModem(deviceID)
+		if !ok {
+			writeError(w, http.StatusNotFound, "not_found", "modem not found")
+			return
+		}
+		if !state.HasMessaging {
+			writeError(w, http.StatusConflict, "messaging_unsupported", "modem does not support messaging")
+			return
+		}
+		if !state.HasSim || state.SIM == nil {
+			writeError(w, http.StatusConflict, "sim_missing", "modem has no active SIM")
+			return
+		}
+		if !canSendSMSInModemState(state.State, state.Registration) {
+			writeError(w, http.StatusConflict, "modem_not_registered", "modem is not registered for SMS")
 			return
 		}
 
@@ -195,6 +213,18 @@ func registerSMS(r chi.Router, deps Deps) {
 		})
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 	})
+}
+
+func canSendSMSInModemState(state modem.ModemStateEnum, registration string) bool {
+	if state != modem.ModemStateRegistered && state != modem.ModemStateConnected {
+		return false
+	}
+	switch registration {
+	case "home", "roaming", "home-sms-only", "roaming-sms-only", "home-csfb-not-preferred", "roaming-csfb-not-preferred", "attached-rlos":
+		return true
+	default:
+		return false
+	}
 }
 
 // findSMSByExtID 根据 ext_id 查最近一条匹配。

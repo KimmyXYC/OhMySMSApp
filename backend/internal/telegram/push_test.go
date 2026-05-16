@@ -13,6 +13,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	internaldb "github.com/KimmyXYC/ohmysmsapp/backend/internal/db"
 	"github.com/KimmyXYC/ohmysmsapp/backend/internal/modem"
 )
 
@@ -157,6 +158,64 @@ func TestPushSMSReceived(t *testing.T) {
 	}
 	if mc.ReplyMarkup != nil {
 		t.Errorf("expected no reply markup, got %T", mc.ReplyMarkup)
+	}
+}
+
+func TestPushSMSReceived_IncludesSIMNumberAndModemNicknameFromStore(t *testing.T) {
+	prov := modem.NewMockProvider(discardLogger())
+	b, fb := testBot(t, prov)
+	ctx := context.Background()
+
+	conn, err := internaldb.Open(ctx, t.TempDir()+"/test.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	store := modem.NewStore(conn)
+	b.store = store
+
+	var m modem.ModemState
+	for _, candidate := range prov.ListModems() {
+		if candidate.SIM != nil && candidate.SIM.OperatorName == "ExampleTel" {
+			m = candidate
+			break
+		}
+	}
+	if m.DeviceID == "" {
+		t.Fatal("mock modem with ExampleTel SIM not found")
+	}
+	modemID, err := store.UpsertModem(ctx, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetModemNickname(ctx, m.DeviceID, "楼下模块"); err != nil {
+		t.Fatal(err)
+	}
+	if m.SIM == nil {
+		t.Fatal("mock modem should have SIM")
+	}
+	simID, err := store.UpsertSim(ctx, *m.SIM, modemID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSIMMSISDNOverride(ctx, simID, "+491701234567"); err != nil {
+		t.Fatal(err)
+	}
+
+	b.dispatchEvent(modem.Event{
+		Kind:     modem.EventSMSReceived,
+		DeviceID: m.DeviceID,
+		Payload:  modem.SMSRecord{Peer: "+1234567890", Text: "code: 654321"},
+	})
+
+	if fb.sentCount() != 1 {
+		t.Fatalf("expected 1 send, got %d", fb.sentCount())
+	}
+	txt := fb.lastMessageText()
+	for _, want := range []string{"新短信", "楼下模块", "+491701234567", "ExampleTel", "654321"} {
+		if !strings.Contains(txt, want) {
+			t.Errorf("push text missing %q:\n%s", want, txt)
+		}
 	}
 }
 

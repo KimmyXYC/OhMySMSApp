@@ -249,6 +249,7 @@ func (b *bot) pushSMSReceived(deviceID string, rec modem.SMSRecord) {
 	// 构造标签
 	modemLabel := ""
 	simLabel := ""
+	simNumber := ""
 	modemIndex := -1
 	modems := b.provider.ListModems()
 	for i, m := range modems {
@@ -257,18 +258,56 @@ func (b *bot) pushSMSReceived(deviceID string, rec modem.SMSRecord) {
 			modemIndex = i
 			if m.SIM != nil {
 				simLabel = nonEmpty(m.SIM.OperatorName, m.SIM.ICCID)
+				simNumber = m.SIM.MSISDN
 			}
 			break
 		}
 	}
+	if row := b.lookupModemRow(deviceID); row != nil {
+		if row.Nickname != nil && strings.TrimSpace(*row.Nickname) != "" {
+			nickname := strings.TrimSpace(*row.Nickname)
+			switch {
+			case modemLabel != "" && modemLabel != nickname:
+				modemLabel = nickname + " (" + modemLabel + ")"
+			default:
+				modemLabel = nickname
+			}
+		}
+		if row.SIM != nil {
+			if row.SIM.MSISDN != nil && strings.TrimSpace(*row.SIM.MSISDN) != "" {
+				simNumber = strings.TrimSpace(*row.SIM.MSISDN)
+			}
+			if row.SIM.OperatorName != nil && strings.TrimSpace(*row.SIM.OperatorName) != "" {
+				simLabel = strings.TrimSpace(*row.SIM.OperatorName)
+			} else if row.SIM.ICCID != "" {
+				simLabel = row.SIM.ICCID
+			}
+		}
+	}
 
-	text := formatSMSNotification(rec, modemLabel, simLabel, deviceID, modemIndex)
+	text := formatSMSNotification(rec, modemLabel, simLabel, simNumber, deviceID, modemIndex)
 	m, err := b.sendMessage(pushChatID, b.pushThread, text, tgbotapi.ModeMarkdownV2, 0, nil)
 	if err != nil {
 		b.log.Warn("telegram push sms failed", "err", err, "peer", rec.Peer)
 		return
 	}
 	b.recordPushedSMS(pushChatID, m.MessageID, deviceID, rec.Peer)
+}
+
+func (b *bot) lookupModemRow(deviceID string) *modem.ModemRow {
+	if b == nil || b.store == nil || deviceID == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(b.bgCtx(), time.Second)
+	defer cancel()
+	row, err := b.store.GetModemByDeviceID(ctx, deviceID)
+	if err != nil {
+		if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+			b.log.Debug("telegram lookupModemRow miss", "device", deviceID, "err", err)
+		}
+		return nil
+	}
+	return row
 }
 
 func (b *bot) recordPushedSMS(chatID int64, messageID int, deviceID, peer string) {

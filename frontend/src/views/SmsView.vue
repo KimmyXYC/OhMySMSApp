@@ -6,7 +6,7 @@ import { useModemsStore } from '@/stores/modems'
 import { useSimsStore } from '@/stores/sims'
 import { ElMessage } from 'element-plus'
 import SmsThread from '@/components/SmsThread.vue'
-import { Search, Position } from '@element-plus/icons-vue'
+import { ChatLineRound, Search, Position } from '@element-plus/icons-vue'
 import { modemLabel } from '@/utils/modemLabel'
 import type { ThreadRow } from '@/types/api'
 
@@ -34,6 +34,12 @@ const sendDeviceId = ref<string>('')
 
 // 发送
 const sendText = ref('')
+
+// 新短信对话框
+const composeVisible = ref(false)
+const composeDeviceId = ref('')
+const composePeer = ref('')
+const composeText = ref('')
 
 // 响应式：小屏模式
 const isMobile = ref(window.innerWidth < 768)
@@ -71,6 +77,30 @@ const modemOptions = computed(() => {
     }))
   return items
 })
+
+const sendableModems = computed(() => {
+  const allowedRegistration = new Set([
+    'home',
+    'roaming',
+    'home-sms-only',
+    'roaming-sms-only',
+    'home-csfb-not-preferred',
+    'roaming-csfb-not-preferred',
+    'attached-rlos',
+  ])
+  return modemsStore.modems.filter((m) =>
+    m.present &&
+    !!m.sim &&
+    (!!m.signal?.registration ? allowedRegistration.has(m.signal.registration) : true),
+  )
+})
+
+const sendableModemOptions = computed(() =>
+  sendableModems.value.map((m) => ({
+    label: modemLabel(m),
+    value: m.device_id,
+  })),
+)
 
 /** 通过 sim_id 找到绑定它的 modem 的 device_id */
 function deviceIdForSim(simId: number | null | undefined): string {
@@ -141,6 +171,58 @@ async function handleSend() {
     })
     sendText.value = ''
     ElMessage.success('已发送')
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || '发送失败')
+  }
+}
+
+function openCompose() {
+  const sendableIDs = new Set(sendableModems.value.map((m) => m.device_id))
+  const selected = selectedDeviceId.value !== ALL_DEVICES ? selectedDeviceId.value : ''
+  if (!composeDeviceId.value) {
+    composeDeviceId.value =
+      (sendableIDs.has(selected) ? selected : '') ||
+      (sendableIDs.has(sendDeviceId.value) ? sendDeviceId.value : '') ||
+      sendableModems.value[0]?.device_id ||
+      ''
+  }
+  if (activePeer.value && !composePeer.value) {
+    composePeer.value = activePeer.value
+  }
+  composeVisible.value = true
+}
+
+async function handleComposeSend() {
+  const deviceID = composeDeviceId.value
+  const peer = composePeer.value.trim()
+  const body = composeText.value.trim()
+  if (!deviceID) {
+    ElMessage.warning('请先选择一个可发送短信的模块')
+    return
+  }
+  if (!peer) {
+    ElMessage.warning('请输入收件号码')
+    return
+  }
+  if (!body) {
+    ElMessage.warning('请输入短信内容')
+    return
+  }
+  try {
+    const simId = simIdForDevice(deviceID)
+    const appendToCurrent = peer === activePeer.value && (simId ?? null) === activeSimId.value
+    await smsStore.sendSms({ device_id: deviceID, peer, body }, { append: appendToCurrent })
+    composeVisible.value = false
+    composePeer.value = ''
+    composeText.value = ''
+    ElMessage.success('已发送')
+
+    await loadThreads()
+    activePeer.value = peer
+    activeSimId.value = simId ?? null
+    showDetail.value = true
+    sendDeviceId.value = deviceID
+    await smsStore.fetchMessages({ peer, sim_id: simId, limit: 200 })
   } catch (e: any) {
     ElMessage.error(e.response?.data?.error || '发送失败')
   }
@@ -229,6 +311,13 @@ onUnmounted(() => {
     <div class="sms-toolbar">
       <h2>短信</h2>
       <div class="sms-toolbar__filters">
+        <el-button
+          type="primary"
+          :icon="ChatLineRound"
+          @click="openCompose"
+        >
+          新短信
+        </el-button>
         <el-select
           v-model="selectedDeviceId"
           style="width: 220px"
@@ -332,7 +421,7 @@ onUnmounted(() => {
               style="width: 160px; flex-shrink: 0"
             >
               <el-option
-                v-for="opt in modemOptions"
+                v-for="opt in sendableModemOptions"
                 :key="opt.value"
                 :label="opt.label"
                 :value="opt.value"
@@ -361,6 +450,65 @@ onUnmounted(() => {
         <el-empty v-else description="选择左侧会话开始查看" :image-size="100" />
       </div>
     </div>
+
+    <el-dialog
+      v-model="composeVisible"
+      title="发送新短信"
+      width="480px"
+      class="sms-compose-dialog"
+    >
+      <el-form label-position="top">
+        <el-form-item label="发送模块">
+          <el-select
+            v-model="composeDeviceId"
+            placeholder="选择已注册且有 SIM 的模块"
+            style="width: 100%"
+            filterable
+          >
+            <el-option
+              v-for="opt in sendableModemOptions"
+              :key="opt.value"
+              :label="opt.label"
+              :value="opt.value"
+            />
+          </el-select>
+          <div v-if="sendableModemOptions.length === 0" class="compose-hint compose-hint--warning">
+            当前没有已注册且可发送短信的模块
+          </div>
+        </el-form-item>
+
+        <el-form-item label="收件号码">
+          <el-input
+            v-model="composePeer"
+            placeholder="例如 +8613800138000"
+            clearable
+          />
+        </el-form-item>
+
+        <el-form-item label="短信内容">
+          <el-input
+            v-model="composeText"
+            type="textarea"
+            :autosize="{ minRows: 4, maxRows: 8 }"
+            maxlength="500"
+            show-word-limit
+            placeholder="输入短信内容..."
+          />
+        </el-form-item>
+      </el-form>
+
+      <template #footer>
+        <el-button @click="composeVisible = false">取消</el-button>
+        <el-button
+          type="primary"
+          :loading="smsStore.sending"
+          :disabled="!composeDeviceId || !composePeer.trim() || !composeText.trim()"
+          @click="handleComposeSend"
+        >
+          发送
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -392,6 +540,17 @@ onUnmounted(() => {
     display: flex;
     gap: 8px;
     align-items: center;
+    flex-wrap: wrap;
+  }
+}
+
+.compose-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+
+  &--warning {
+    color: var(--el-color-warning);
   }
 }
 

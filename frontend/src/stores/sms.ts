@@ -66,12 +66,12 @@ export const useSmsStore = defineStore('sms', () => {
     }
   }
 
-  async function sendSms(req: SmsSendRequest) {
+  async function sendSms(req: SmsSendRequest, options?: { append?: boolean }) {
     sending.value = true
     try {
       const { data } = await sendSmsApi(req)
       // 将返回的消息追加到当前流
-      if (data && data.id) {
+      if ((options?.append ?? true) && data && data.id) {
         currentMessages.value.push(data)
       }
       return data

@@ -41,16 +41,29 @@ func escapeCode(s string) string {
 }
 
 // formatSMSNotification 生成新短信推送消息（MarkdownV2）。
-// modemLabel 形如 "EC20F"；simLabel 形如 "giffgaff" 或 ICCID 前后截断。
-func formatSMSNotification(rec modem.SMSRecord, modemLabel, simLabel, deviceID string, modemIndex int) string {
+// modemLabel 形如 "EC20F" 或 "客厅模块 (EC20F)"；simLabel 形如 "giffgaff" 或 ICCID。
+// simNumber 是 ohmysmsapp 最终展示号码（本地覆盖优先，其次硬件 OwnNumbers）。
+func formatSMSNotification(rec modem.SMSRecord, modemLabel, simLabel, simNumber, deviceID string, modemIndex int) string {
 	var b strings.Builder
 	b.WriteString("📩 *新短信*\n")
 	b.WriteString("来自: `")
 	b.WriteString(escapeCode(rec.Peer))
 	b.WriteString("`\n")
-	if simLabel != "" {
+	if simNumber != "" || simLabel != "" {
 		b.WriteString("SIM: ")
-		b.WriteString(escapeMarkdownV2(simLabel))
+		switch {
+		case simNumber != "" && simLabel != "":
+			b.WriteString("`")
+			b.WriteString(escapeCode(simNumber))
+			b.WriteString("` ")
+			b.WriteString(escapeMarkdownV2("(" + simLabel + ")"))
+		case simNumber != "":
+			b.WriteString("`")
+			b.WriteString(escapeCode(simNumber))
+			b.WriteString("`")
+		default:
+			b.WriteString(escapeMarkdownV2(simLabel))
+		}
 		b.WriteString("\n")
 	}
 	if modemLabel != "" || deviceID != "" {
